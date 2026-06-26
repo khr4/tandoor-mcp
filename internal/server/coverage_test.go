@@ -132,7 +132,7 @@ func TestSetRecipeStepsPatchesSteps(t *testing.T) {
 	var patchBody map[string]any
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/ingredient-parser/":
+		case r.URL.Path == "/api/ingredient-parser/post/":
 			_, _ = io.WriteString(w, `{"ingredients":[{"amount":1,"unit":{"name":"tsp"},"food":{"name":"salt"}}]}`)
 		case r.Method == http.MethodPatch:
 			patchBody = decodeBody(t, r)
@@ -472,7 +472,7 @@ func TestCreateRecipeWrapsTopLevelIngredients(t *testing.T) {
 	var body map[string]any
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/ingredient-parser/":
+		case "/api/ingredient-parser/post/":
 			_, _ = io.WriteString(w, `{"ingredients":[{"amount":1,"unit":{"name":"tsp"},"food":{"name":"salt"}}]}`)
 		case "/api/recipe/":
 			body = decodeBody(t, r)
@@ -518,6 +518,18 @@ func TestImportPreviewRendersSteps(t *testing.T) {
 	}
 }
 
+func TestCardKeywordFallsBackToLabel(t *testing.T) {
+	// The recipe LIST endpoint returns keywords as {id,label} with no name.
+	var r apiRecipe
+	if err := json.Unmarshal([]byte(`{"id":2,"name":"Live Pancakes","keywords":[{"id":2,"label":"breakfast"}]}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	card := toCard(r)
+	if len(card.Keywords) != 1 || card.Keywords[0] != "breakfast" {
+		t.Errorf("card keywords = %v, want [breakfast] from label fallback", card.Keywords)
+	}
+}
+
 // ---- v0.2.1 hardening ----
 
 func TestResolveRecipeAmbiguousNameErrors(t *testing.T) {
@@ -531,7 +543,7 @@ func TestResolveRecipeAmbiguousNameErrors(t *testing.T) {
 
 func TestBuildStepsRejectsParserCountMismatch(t *testing.T) {
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/ingredient-parser/" {
+		if r.URL.Path == "/api/ingredient-parser/post/" {
 			_, _ = io.WriteString(w, `{"ingredients":[{"amount":1,"food":{"name":"salt"}}]}`) // 1 result for 2 lines
 			return
 		}

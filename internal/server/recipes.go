@@ -404,7 +404,7 @@ func (h *handlers) mergedKeywordNames(ctx context.Context, recipeID int, add, re
 	}
 	set := map[string]string{} // lower -> display
 	for _, k := range r.Keywords {
-		set[strings.ToLower(k.Name)] = k.Name
+		set[strings.ToLower(k.display())] = k.display()
 	}
 	for _, n := range add {
 		if n = strings.TrimSpace(n); n != "" {
@@ -580,10 +580,10 @@ func keywordObjects(names []string) []map[string]any {
 	return out
 }
 
-func keywordNames(ks []named) []string {
+func keywordNames(ks []apiKeyword) []string {
 	out := make([]string, 0, len(ks))
 	for _, k := range ks {
-		out = append(out, k.Name)
+		out = append(out, k.display())
 	}
 	return out
 }

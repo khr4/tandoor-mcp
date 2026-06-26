@@ -29,8 +29,13 @@ type stepInput struct {
 
 // parseIngredientLines turns natural-language lines into structured ingredients
 // using Tandoor's ingredient parser. Results are in input order.
+//
+// The endpoint is the viewset's POST action, whose route is ".../post/" (the
+// action method is named "post", so DRF derives that url_path). Posting to the
+// bare "ingredient-parser/" instead falls through to the SPA catch-all and is
+// rejected by CSRF — verified against a live instance.
 func (h *handlers) parseIngredientLines(ctx context.Context, lines []string) ([]apiIngredient, error) {
-	raw, err := h.c.Do(ctx, http.MethodPost, "ingredient-parser/", nil, map[string]any{"ingredients": lines})
+	raw, err := h.c.Do(ctx, http.MethodPost, "ingredient-parser/post/", nil, map[string]any{"ingredients": lines})
 	if err != nil {
 		return nil, err
 	}

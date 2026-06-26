@@ -93,17 +93,33 @@ type apiStep struct {
 	Ingredients []apiIngredient `json:"ingredients"`
 }
 
+// apiKeyword captures both name and label because the recipe LIST endpoint
+// serializes keywords as {id, label} (no name), while the detail endpoint
+// includes name.
+type apiKeyword struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Label string `json:"label"`
+}
+
+func (k apiKeyword) display() string {
+	if k.Name != "" {
+		return k.Name
+	}
+	return k.Label
+}
+
 type apiRecipe struct {
-	ID          int       `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Rating      flexNum   `json:"rating"`
-	WorkingTime flexNum   `json:"working_time"`
-	WaitingTime flexNum   `json:"waiting_time"`
-	Servings    flexNum   `json:"servings"`
-	SourceURL   string    `json:"source_url"`
-	Keywords    []named   `json:"keywords"`
-	Steps       []apiStep `json:"steps"`
+	ID          int          `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Rating      flexNum      `json:"rating"`
+	WorkingTime flexNum      `json:"working_time"`
+	WaitingTime flexNum      `json:"waiting_time"`
+	Servings    flexNum      `json:"servings"`
+	SourceURL   string       `json:"source_url"`
+	Keywords    []apiKeyword `json:"keywords"`
+	Steps       []apiStep    `json:"steps"`
 }
 
 // recipeCard is the compact result shape returned by find_recipes.
@@ -127,7 +143,7 @@ func toCard(r apiRecipe) recipeCard {
 		Servings:       r.Servings.String(),
 	}
 	for _, k := range r.Keywords {
-		c.Keywords = append(c.Keywords, k.Name)
+		c.Keywords = append(c.Keywords, k.display())
 	}
 	return c
 }
@@ -185,7 +201,7 @@ func renderRecipe(r apiRecipe) string {
 	if len(r.Keywords) > 0 {
 		names := make([]string, 0, len(r.Keywords))
 		for _, k := range r.Keywords {
-			names = append(names, k.Name)
+			names = append(names, k.display())
 		}
 		fmt.Fprintf(&b, "Tags: %s\n", strings.Join(names, ", "))
 	}

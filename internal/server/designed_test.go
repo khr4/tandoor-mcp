@@ -157,7 +157,7 @@ func TestCreateRecipeParsesLinesAndPostsExplicitQuantities(t *testing.T) {
 	var parserCalled bool
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/ingredient-parser/":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/ingredient-parser/post/":
 			parserCalled = true
 			_, _ = io.WriteString(w, `{"ingredients":[{"amount":2,"unit":{"name":"cup"},"food":{"name":"flour"},"no_amount":false,"note":""}]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/recipe/":
