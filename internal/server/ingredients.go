@@ -67,10 +67,13 @@ func (h *handlers) buildSteps(ctx context.Context, steps []stepInput) ([]map[str
 		if err != nil {
 			return nil, err
 		}
+		// The parser returns exactly one result per non-blank line, in order.
+		// A mismatch would silently mis-pair quantities, so fail loudly instead.
+		if len(results) != len(texts) {
+			return nil, fmt.Errorf("ingredient parser returned %d results for %d lines", len(results), len(texts))
+		}
 		for k, r := range refs {
-			if k < len(results) {
-				parsed[r] = results[k]
-			}
+			parsed[r] = results[k]
 		}
 	}
 
@@ -143,7 +146,9 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 	if food == "" {
 		return nil, fmt.Errorf("ingredient needs either text or a food name")
 	}
-	noAmount := in.Amount == nil && strings.TrimSpace(in.Unit) == ""
+	// No number given means no amount, even if a unit (e.g. "pinch") is present —
+	// otherwise the ingredient would render as "0 pinch salt".
+	noAmount := in.Amount == nil
 	m := map[string]any{
 		"food":          map[string]any{"name": food},
 		"note":          in.Note,

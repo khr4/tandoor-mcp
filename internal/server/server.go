@@ -15,7 +15,7 @@ import (
 )
 
 // Version is reported to MCP clients during initialization.
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // Options configures server-layer policy that isn't part of the API client.
 type Options struct {

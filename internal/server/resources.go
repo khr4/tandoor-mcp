@@ -83,6 +83,7 @@ var sensitiveResources = map[string]bool{
 	"ai-log":           true,
 	"access-token":     true,
 	"connector-config": true,
+	"invite-link":      true, // carries a bearer token to join the space
 }
 
 func lookupResource(name string) (Resource, bool) {

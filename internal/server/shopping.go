@@ -12,6 +12,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// shoppingScanPages bounds the shopping-list pagination loop so a misbehaving
+// instance whose `next` never clears cannot spin forever.
+const shoppingScanPages = 50
+
 type apiShoppingEntry struct {
 	ID      int     `json:"id"`
 	Amount  flexNum `json:"amount"`
@@ -40,7 +44,7 @@ func (e apiShoppingEntry) line() string {
 // shoppingEntries fetches all shopping list entries, following pagination.
 func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, error) {
 	var all []apiShoppingEntry
-	for page := 1; ; page++ {
+	for page := 1; page <= shoppingScanPages; page++ {
 		q := url.Values{}
 		q.Set("page", strconv.Itoa(page))
 		q.Set("page_size", "200")
@@ -124,7 +128,9 @@ func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 		return nil, nil, err
 	}
 	var created apiShoppingEntry
-	_ = json.Unmarshal(raw, &created)
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return nil, nil, fmt.Errorf("decoding created shopping entry: %w", err)
+	}
 	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": in.Food})
 }
 

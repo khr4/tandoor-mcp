@@ -518,6 +518,164 @@ func TestImportPreviewRendersSteps(t *testing.T) {
 	}
 }
 
+// ---- v0.2.1 hardening ----
+
+func TestResolveRecipeAmbiguousNameErrors(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":3,"name":"Soup"},{"id":9,"name":"Soup"}]}`)
+	})
+	if _, err := h.resolveRecipe(context.Background(), "Soup"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("err = %v, want ambiguity error", err)
+	}
+}
+
+func TestBuildStepsRejectsParserCountMismatch(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/ingredient-parser/" {
+			_, _ = io.WriteString(w, `{"ingredients":[{"amount":1,"food":{"name":"salt"}}]}`) // 1 result for 2 lines
+			return
+		}
+		t.Error("recipe must not be posted on a parser count mismatch")
+	})
+	_, _, err := h.createRecipe(context.Background(), nil, createRecipeInput{
+		Name:        "X",
+		Ingredients: []ingredientInput{{Text: "1 tsp salt"}, {Text: "2 cups flour"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parser returned") {
+		t.Errorf("err = %v, want count-mismatch error", err)
+	}
+}
+
+func TestGetOrCreateIDFallsBackOnDuplicate(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"name":["already exists"]}`)
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":5,"name":"Salt"}]}`)
+		}
+	})
+	id, err := h.getOrCreateID(context.Background(), "food", "Salt")
+	if err != nil || id != 5 {
+		t.Fatalf("getOrCreateID = (%d,%v), want (5,nil) via fallback", id, err)
+	}
+}
+
+func TestFlexNumKeepsRawAndBuildIngredientNoSilentZero(t *testing.T) {
+	var s struct {
+		A flexNum `json:"a"`
+	}
+	if err := json.Unmarshal([]byte(`{"a":"a pinch"}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.A.Set || s.A.String() != "a pinch" {
+		t.Errorf("flexNum = %+v, want raw 'a pinch' (not zeroed)", s.A)
+	}
+	p := apiIngredient{Amount: flexNum{Raw: "a pinch"}, Food: &apiFood{Name: "salt"}}
+	m, err := buildIngredient(ingredientInput{Text: "a pinch of salt"}, &p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["no_amount"] != true {
+		t.Errorf("no_amount = %v, want true for a non-numeric amount", m["no_amount"])
+	}
+}
+
+func TestBuildIngredientUnitWithoutAmount(t *testing.T) {
+	m, err := buildIngredient(ingredientInput{Unit: "pinch", Food: "salt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["no_amount"] != true {
+		t.Errorf("no_amount = %v, want true (unit present but no amount)", m["no_amount"])
+	}
+}
+
+func TestShoppingEntriesPaginates(t *testing.T) {
+	var reqs int
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		reqs++
+		if strings.Contains(r.URL.RawQuery, "page=1") {
+			_, _ = io.WriteString(w, `{"next":"x","results":[{"id":1,"checked":false}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":2,"checked":false}]}`)
+	})
+	entries, err := h.shoppingEntries(context.Background())
+	if err != nil {
+		t.Fatalf("shoppingEntries: %v", err)
+	}
+	if len(entries) != 2 || reqs != 2 {
+		t.Errorf("entries=%d reqs=%d, want 2 and 2", len(entries), reqs)
+	}
+}
+
+func TestShoppingEntriesStopsAtPageCap(t *testing.T) {
+	var reqs int
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		reqs++
+		_, _ = io.WriteString(w, `{"next":"always","results":[{"id":1}]}`) // next never clears
+	})
+	if _, err := h.shoppingEntries(context.Background()); err != nil {
+		t.Fatalf("shoppingEntries: %v", err)
+	}
+	if reqs != shoppingScanPages {
+		t.Errorf("reqs = %d, want capped at %d", reqs, shoppingScanPages)
+	}
+}
+
+func TestSafeImagePathUniformErrorNoOracle(t *testing.T) {
+	dir := t.TempDir()
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {})
+	h.imageDir = dir
+
+	_, errMissing := h.safeImagePath(filepath.Join(dir, "nope.png"))
+	outside := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, errOutside := h.safeImagePath(outside)
+
+	if errMissing == nil || errOutside == nil {
+		t.Fatal("both an absent and an outside path must error")
+	}
+	if errMissing.Error() != errOutside.Error() {
+		t.Errorf("error strings differ (existence oracle): %q vs %q", errMissing, errOutside)
+	}
+	for _, leak := range []string{"no such file", "permission denied", dir} {
+		if strings.Contains(errMissing.Error(), leak) {
+			t.Errorf("error leaks %q: %s", leak, errMissing)
+		}
+	}
+}
+
+func TestSetRecipeImageRejectsOversize(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.png")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxImageBytes + 1); err != nil { // sparse file, no real bytes written
+		t.Fatal(err)
+	}
+	f.Close()
+
+	posted := false
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		posted = true
+		_, _ = io.WriteString(w, `{}`)
+	})
+	h.imageDir = dir
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: big}); err == nil {
+		t.Error("expected oversize rejection")
+	}
+	if posted {
+		t.Error("oversize image must not be uploaded")
+	}
+}
+
 func TestMergeTaxonomyResolvesNames(t *testing.T) {
 	var path string
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {

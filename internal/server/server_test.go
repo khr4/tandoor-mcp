@@ -157,7 +157,7 @@ func TestGenericDeleteConfirms(t *testing.T) {
 
 func TestGenericToolsDenySensitiveResources(t *testing.T) {
 	h := newHandlers(t, &recorder{reply: `{"token":"secret"}`})
-	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config"} {
+	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config", "invite-link"} {
 		if _, _, err := h.genericGet(context.Background(), nil, getInput{Resource: res, ID: "1"}); err == nil {
 			t.Errorf("genericGet(%s) should be denied", res)
 		}

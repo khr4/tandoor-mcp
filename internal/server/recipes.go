@@ -60,12 +60,12 @@ func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 	}
 	if in.Book != "" {
 		id, found, err := h.resolveExistingID(ctx, "recipe-book", in.Book)
-		if err != nil {
-			return nil, nil, err
-		}
-		if found {
+		switch {
+		case err != nil:
+			warnings = append(warnings, fmt.Sprintf("could not look up recipe book %q: %v; ignored as a filter", in.Book, err))
+		case found:
 			q.Set("books_and", strconv.Itoa(id))
-		} else {
+		default:
 			warnings = append(warnings, fmt.Sprintf("recipe book %q not found; ignored as a filter", in.Book))
 		}
 	}
@@ -460,9 +460,12 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 		if err != nil {
 			return nil, nil, err
 		}
+		if fi, err := os.Stat(full); err == nil && fi.Size() > maxImageBytes {
+			return nil, nil, fmt.Errorf("image is %d bytes, larger than the %d byte limit", fi.Size(), maxImageBytes)
+		}
 		f, err := os.Open(full)
 		if err != nil {
-			return nil, nil, fmt.Errorf("opening image: %w", err)
+			return nil, nil, errImagePathDenied
 		}
 		defer f.Close()
 		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(full), io.LimitReader(f, maxImageBytes)); err != nil {
@@ -482,6 +485,11 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 }
 
+// errImagePathDenied is a single, uniform error for any local image path that is
+// missing or outside the allowed directory, so the tool can't be used to probe
+// which host files exist.
+var errImagePathDenied = errors.New("image_path is not an accessible file within the allowed image directory")
+
 // safeImagePath validates a local image path against the configured allow-dir.
 func (h *handlers) safeImagePath(p string) (string, error) {
 	if h.imageDir == "" {
@@ -493,11 +501,11 @@ func (h *handlers) safeImagePath(p string) (string, error) {
 	}
 	full, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", fmt.Errorf("opening image: %w", err)
+		return "", errImagePathDenied
 	}
 	rel, err := filepath.Rel(root, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("image_path %q is outside the allowed image directory", p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errImagePathDenied
 	}
 	return full, nil
 }
