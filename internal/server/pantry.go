@@ -1,0 +1,92 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// pantryScanPages bounds how many food pages get_pantry will scan, since the API
+// offers no server-side on-hand filter.
+const pantryScanPages = 10
+const pantryPageSize = 200
+
+type apiFoodOnhand struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	FoodOnhand bool   `json:"food_onhand"`
+}
+
+type pantryOutput struct {
+	OnHand    []named `json:"on_hand"`
+	Truncated bool    `json:"truncated,omitempty"`
+	Note      string  `json:"note,omitempty"`
+}
+
+// ---- get_pantry ----
+
+// GetPantry lists foods currently marked on-hand. It scans the food list because
+// Tandoor exposes no on-hand filter; very large food catalogs may be truncated.
+func (h *handlers) GetPantry(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	out := pantryOutput{}
+	for page := 1; page <= pantryScanPages; page++ {
+		q := url.Values{}
+		q.Set("page", fmt.Sprintf("%d", page))
+		q.Set("page_size", fmt.Sprintf("%d", pantryPageSize))
+		raw, err := h.c.Do(ctx, http.MethodGet, "food/", q, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		var env listEnvelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, nil, fmt.Errorf("decoding food list: %w", err)
+		}
+		var foods []apiFoodOnhand
+		if err := json.Unmarshal(env.Results, &foods); err != nil {
+			return nil, nil, fmt.Errorf("decoding foods: %w", err)
+		}
+		for _, f := range foods {
+			if f.FoodOnhand {
+				out.OnHand = append(out.OnHand, named{ID: f.ID, Name: f.Name})
+			}
+		}
+		if env.Next == nil || *env.Next == "" {
+			return jsonResult(out)
+		}
+	}
+	out.Truncated = true
+	out.Note = fmt.Sprintf("scanned the first %d pages of foods; more may exist", pantryScanPages)
+	return jsonResult(out)
+}
+
+// ---- set_food_on_hand ----
+
+type setOnhandInput struct {
+	Food   string `json:"food" jsonschema:"food name"`
+	OnHand *bool  `json:"on_hand,omitempty" jsonschema:"true to mark on-hand (default), false to clear"`
+}
+
+// SetFoodOnHand marks a food as on-hand (in the pantry) or clears it.
+func (h *handlers) SetFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in setOnhandInput) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(in.Food) == "" {
+		return nil, nil, fmt.Errorf("food is required")
+	}
+	id, err := h.getOrCreateID(ctx, "food", in.Food)
+	if err != nil {
+		return nil, nil, err
+	}
+	onHand := in.OnHand == nil || *in.OnHand
+	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("food/%d/", id), nil, map[string]any{"food_onhand": onHand}); err != nil {
+		return nil, nil, err
+	}
+	state := "on-hand"
+	if !onHand {
+		state = "not on-hand"
+	}
+	return textResult(fmt.Sprintf("marked %s as %s", in.Food, state))
+}

@@ -1,0 +1,7 @@
+# Built binary
+/tandoor-mcp
+# Go test/coverage artifacts
+*.out
+*.test
+# Editor/OS noise
+.DS_Store
