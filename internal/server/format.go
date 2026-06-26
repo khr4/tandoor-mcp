@@ -133,6 +133,57 @@ type recipeCard struct {
 	Keywords       []string `json:"keywords,omitempty"`
 }
 
+// ingredientOut and stepOut mirror the create_recipe / set_recipe_steps input
+// shapes (ingredientInput / stepInput) so get_recipe's structured steps can be
+// edited and fed straight back without parsing the Markdown.
+type ingredientOut struct {
+	Amount   *float64 `json:"amount,omitempty"`
+	Unit     string   `json:"unit,omitempty"`
+	Food     string   `json:"food,omitempty"`
+	Note     string   `json:"note,omitempty"`
+	IsHeader bool     `json:"is_header,omitempty"`
+}
+
+type stepOut struct {
+	Instruction string          `json:"instruction,omitempty"`
+	Time        *int            `json:"time,omitempty"`
+	Ingredients []ingredientOut `json:"ingredients"`
+}
+
+func toIngredientOut(ing apiIngredient) ingredientOut {
+	o := ingredientOut{Note: ing.Note, IsHeader: ing.IsHeader}
+	if ing.IsHeader {
+		return o // a header carries its text in note
+	}
+	if !ing.NoAmount && ing.Amount.Set {
+		v := ing.Amount.Value
+		o.Amount = &v
+	}
+	if ing.Unit != nil {
+		o.Unit = ing.Unit.Name
+	}
+	if ing.Food != nil {
+		o.Food = ing.Food.Name
+	}
+	return o
+}
+
+func toStepOuts(r apiRecipe) []stepOut {
+	steps := make([]stepOut, 0, len(r.Steps))
+	for _, st := range r.Steps {
+		s := stepOut{Instruction: st.Instruction, Ingredients: make([]ingredientOut, 0, len(st.Ingredients))}
+		if st.Time.Set && st.Time.Value != 0 {
+			t := int(st.Time.Value)
+			s.Time = &t
+		}
+		for _, ing := range st.Ingredients {
+			s.Ingredients = append(s.Ingredients, toIngredientOut(ing))
+		}
+		steps = append(steps, s)
+	}
+	return steps
+}
+
 func toCard(r apiRecipe) recipeCard {
 	c := recipeCard{
 		ID:             r.ID,

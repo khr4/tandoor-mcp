@@ -14,11 +14,12 @@ import (
 // always captured separately: a parsed line is split into amount + unit + food,
 // and the structured form keeps amount and unit distinct from the food.
 type ingredientInput struct {
-	Text   string   `json:"text,omitempty" jsonschema:"natural ingredient line, e.g. \"2 cups flour\" or \"salt to taste\"; parsed into amount, unit and food automatically"`
-	Amount *float64 `json:"amount,omitempty" jsonschema:"numeric quantity (use with unit and food instead of text)"`
-	Unit   string   `json:"unit,omitempty" jsonschema:"unit name for the amount, e.g. g, ml, cup, tbsp; leave empty for countable items like eggs"`
-	Food   string   `json:"food,omitempty" jsonschema:"food/ingredient name, e.g. flour"`
-	Note   string   `json:"note,omitempty" jsonschema:"preparation note, e.g. finely chopped"`
+	Text     string   `json:"text,omitempty" jsonschema:"natural ingredient line, e.g. \"2 cups flour\" or \"salt to taste\"; parsed into amount, unit and food automatically"`
+	Amount   *float64 `json:"amount,omitempty" jsonschema:"numeric quantity (use with unit and food instead of text)"`
+	Unit     string   `json:"unit,omitempty" jsonschema:"unit name for the amount, e.g. g, ml, cup, tbsp; leave empty for countable items like eggs"`
+	Food     string   `json:"food,omitempty" jsonschema:"food/ingredient name, e.g. flour"`
+	Note     string   `json:"note,omitempty" jsonschema:"preparation note, e.g. finely chopped"`
+	IsHeader bool     `json:"is_header,omitempty" jsonschema:"true for a section header line (e.g. \"For the sauce\"); the header text goes in note"`
 }
 
 type stepInput struct {
@@ -147,6 +148,17 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		return m, nil
 	}
 
+	if in.IsHeader {
+		return map[string]any{
+			"is_header":     true,
+			"no_amount":     true,
+			"note":          in.Note,
+			"food":          nil,
+			"unit":          nil,
+			"amount":        0,
+			"original_text": in.Note,
+		}, nil
+	}
 	food := strings.TrimSpace(in.Food)
 	if food == "" {
 		return nil, fmt.Errorf("ingredient needs either text or a food name")

@@ -15,7 +15,7 @@ import (
 )
 
 // Version is reported to MCP clients during initialization.
-const Version = "0.2.2"
+const Version = "0.2.3"
 
 // Options configures server-layer policy that isn't part of the API client.
 type Options struct {
@@ -56,11 +56,11 @@ func (h *handlers) register(s *mcp.Server) {
 
 	// Recipes.
 	mcp.AddTool(s, &mcp.Tool{Name: "find_recipes", Description: "Search recipes by words, keyword/ingredient names (match ALL), recipe book, minimum rating, or what you can make from on-hand foods. Returns compact recipe cards (id, name, rating, times, tags)."}, h.findRecipes)
-	mcp.AddTool(s, &mcp.Tool{Name: "get_recipe", Description: "Get one recipe (by name or id) as structured fields plus a readable Markdown view. Optionally re-scale amounts to a serving count."}, h.getRecipe)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_recipe", Description: "Get one recipe (by name or id) as structured fields, a structured steps[] array (editable and accepted directly by set_recipe_steps), and a readable Markdown view. Optionally re-scale amounts to a serving count."}, h.getRecipe)
 	mcp.AddTool(s, &mcp.Tool{Name: "create_recipe", Description: "Create a recipe. Provide ingredients as natural lines (\"2 cups flour\", parsed into amount+unit+food) or as {amount, unit, food}. Use top-level ingredients for a simple recipe, or steps[] for multi-step. Foods/units/keywords are created by name."}, h.createRecipe)
 	mcp.AddTool(s, &mcp.Tool{Name: "import_recipe_from_url", Description: "Import a recipe from a web page (http/https): scrapes and saves it (save=false returns a parsed preview)."}, h.importRecipeFromURL)
 	mcp.AddTool(s, &mcp.Tool{Name: "update_recipe", Description: "Edit a recipe (by name or id): name, description, servings, times, source, add/remove keywords."}, h.updateRecipe)
-	mcp.AddTool(s, &mcp.Tool{Name: "set_recipe_steps", Description: "Replace a recipe's steps and ingredients with a new list (re-describe them to edit; same ingredient format as create_recipe)."}, h.setRecipeSteps)
+	mcp.AddTool(s, &mcp.Tool{Name: "set_recipe_steps", Description: "Replace a recipe's steps and ingredients with a new list. To edit, read get_recipe's steps[], change what you need, and pass them back here (same shape)."}, h.setRecipeSteps)
 	mcp.AddTool(s, &mcp.Tool{Name: "delete_recipe", Description: "Delete a recipe (by name or id)."}, h.deleteRecipe)
 	mcp.AddTool(s, &mcp.Tool{Name: "set_recipe_image", Description: "Set a recipe's image from a remote image URL, or a local file path if the server has an allowed image directory configured."}, h.setRecipeImage)
 	mcp.AddTool(s, &mcp.Tool{Name: "find_related_recipes", Description: "List recipes related to a recipe (sharing keywords/foods)."}, h.findRelatedRecipes)

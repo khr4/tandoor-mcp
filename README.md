@@ -61,11 +61,11 @@ Recipes — every recipe argument accepts a **name or id**:
 | Tool | Purpose |
 |---|---|
 | `find_recipes` | Search by words, keyword/ingredient **names** (match ALL), book, rating, or makeable-now. Returns compact cards. |
-| `get_recipe` | One recipe as structured fields + a Markdown view; optional `servings` re-scales amounts. |
+| `get_recipe` | One recipe as structured fields, an editable `steps[]` array, and a Markdown view; optional `servings` re-scales amounts. |
 | `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`; top-level `ingredients` for simple recipes or `steps[]` for multi-step. Foods/units/keywords created by name. |
 | `import_recipe_from_url` | Scrape a web page and save it (`save=false` for a preview). |
 | `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. |
-| `set_recipe_steps` | Replace a recipe's steps/ingredients (re-describe to edit). |
+| `set_recipe_steps` | Replace a recipe's steps/ingredients — read `get_recipe`'s `steps[]`, edit, pass back. |
 | `delete_recipe` | Delete a recipe. |
 | `set_recipe_image` | Set an image from a remote URL, or a local file within `TANDOOR_IMAGE_DIR`. |
 | `find_related_recipes` | Recipes sharing keywords/foods. |

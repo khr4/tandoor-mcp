@@ -518,6 +518,57 @@ func TestImportPreviewRendersSteps(t *testing.T) {
 	}
 }
 
+func TestBuildIngredientHeader(t *testing.T) {
+	m, err := buildIngredient(ingredientInput{IsHeader: true, Note: "For the sauce"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["is_header"] != true || m["note"] != "For the sauce" {
+		t.Errorf("header ingredient = %v", m)
+	}
+}
+
+// TestGetRecipeStepsRoundTripToSetSteps proves get_recipe's structured steps
+// deserialize directly into the set_recipe_steps input and rebuild losslessly,
+// including a no-amount ingredient and a section header — no Markdown parsing.
+func TestGetRecipeStepsRoundTripToSetSteps(t *testing.T) {
+	var r apiRecipe
+	if err := json.Unmarshal([]byte(`{"id":1,"name":"X","steps":[{"instruction":"mix","time":5,"ingredients":[
+		{"amount":2,"unit":{"name":"cup"},"food":{"name":"flour"}},
+		{"food":{"name":"salt"},"no_amount":true,"note":"to taste"},
+		{"is_header":true,"note":"For the topping"}]}]}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(toStepOuts(r))
+	var in []stepInput
+	if err := json.Unmarshal(b, &in); err != nil {
+		t.Fatalf("round-trip decode into set_recipe_steps input: %v", err)
+	}
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("no parser call expected for already-structured ingredients")
+	})
+	built, err := h.buildSteps(context.Background(), in)
+	if err != nil {
+		t.Fatalf("buildSteps: %v", err)
+	}
+	if len(built) != 1 || built[0]["time"] != 5 {
+		t.Fatalf("step = %v", built)
+	}
+	ings := built[0]["ingredients"].([]map[string]any)
+	if len(ings) != 3 {
+		t.Fatalf("ingredients = %d, want 3", len(ings))
+	}
+	if ings[0]["amount"] != 2.0 || at(t, ings[0], "food", "name") != "flour" {
+		t.Errorf("ing0 = %v", ings[0])
+	}
+	if ings[1]["no_amount"] != true || at(t, ings[1], "food", "name") != "salt" {
+		t.Errorf("ing1 = %v", ings[1])
+	}
+	if ings[2]["is_header"] != true || ings[2]["note"] != "For the topping" {
+		t.Errorf("ing2 header = %v", ings[2])
+	}
+}
+
 func TestCardKeywordFallsBackToLabel(t *testing.T) {
 	// The recipe LIST endpoint returns keywords as {id,label} with no name.
 	var r apiRecipe
