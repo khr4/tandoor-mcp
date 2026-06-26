@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,8 +14,10 @@ import (
 
 // pantryScanPages bounds how many food pages get_pantry will scan, since the API
 // offers no server-side on-hand filter.
-const pantryScanPages = 10
-const pantryPageSize = 200
+const (
+	pantryScanPages = 10
+	pantryPageSize  = 200
+)
 
 type apiFoodOnhand struct {
 	ID         int    `json:"id"`
@@ -30,14 +33,14 @@ type pantryOutput struct {
 
 // ---- get_pantry ----
 
-// GetPantry lists foods currently marked on-hand. It scans the food list because
+// getPantry lists foods currently marked on-hand. It scans the food list because
 // Tandoor exposes no on-hand filter; very large food catalogs may be truncated.
-func (h *handlers) GetPantry(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	out := pantryOutput{}
+func (h *handlers) getPantry(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	out := pantryOutput{OnHand: []named{}}
 	for page := 1; page <= pantryScanPages; page++ {
 		q := url.Values{}
-		q.Set("page", fmt.Sprintf("%d", page))
-		q.Set("page_size", fmt.Sprintf("%d", pantryPageSize))
+		q.Set("page", strconv.Itoa(page))
+		q.Set("page_size", strconv.Itoa(pantryPageSize))
 		raw, err := h.c.Do(ctx, http.MethodGet, "food/", q, nil)
 		if err != nil {
 			return nil, nil, err
@@ -71,8 +74,8 @@ type setOnhandInput struct {
 	OnHand *bool  `json:"on_hand,omitempty" jsonschema:"true to mark on-hand (default), false to clear"`
 }
 
-// SetFoodOnHand marks a food as on-hand (in the pantry) or clears it.
-func (h *handlers) SetFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in setOnhandInput) (*mcp.CallToolResult, any, error) {
+// setFoodOnHand marks a food as on-hand (in the pantry) or clears it.
+func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in setOnhandInput) (*mcp.CallToolResult, any, error) {
 	if strings.TrimSpace(in.Food) == "" {
 		return nil, nil, fmt.Errorf("food is required")
 	}
@@ -84,9 +87,5 @@ func (h *handlers) SetFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("food/%d/", id), nil, map[string]any{"food_onhand": onHand}); err != nil {
 		return nil, nil, err
 	}
-	state := "on-hand"
-	if !onHand {
-		state = "not on-hand"
-	}
-	return textResult(fmt.Sprintf("marked %s as %s", in.Food, state))
+	return jsonResult(map[string]any{"status": "updated", "food": in.Food, "id": id, "on_hand": onHand})
 }

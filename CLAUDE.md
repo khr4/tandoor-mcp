@@ -26,7 +26,7 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
     - `planning.go` — `plan_meal`, `get_meal_plan`.
     - `shopping.go` — shopping list read/add/update/clear.
     - `pantry.go` — `get_pantry`, `set_food_on_hand`.
-    - `taxonomy.go` — `list_*` and keyword/food/unit merge/move.
+    - `taxonomy.go` — `list_taxonomy` / `merge_taxonomy` / `move_taxonomy` (kind-parameterized, names accepted).
     - `ingredients.go` — parse natural lines, build nested ingredient payloads
       with **explicit amount + unit** (never flattened into text).
     - `resolve.go` — resolve names to ids (find-existing / get-or-create).

@@ -1,9 +1,11 @@
 package tandoor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -11,7 +13,50 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+func TestNewInsecureLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(io.Discard); log.SetOutput(nil) })
+	if _, err := New(Config{BaseURL: "https://x.example", Token: "t", Insecure: true}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !strings.Contains(buf.String(), "TLS certificate verification disabled") {
+		t.Errorf("expected insecure warning, got %q", buf.String())
+	}
+}
+
+func TestAPIErrorTruncatesOnRuneBoundary(t *testing.T) {
+	e := &APIError{StatusCode: 400, Method: "POST", Path: "recipe/", Body: strings.Repeat("é", 5000)}
+	msg := e.Error()
+	if !utf8.ValidString(msg) {
+		t.Error("error message is not valid UTF-8")
+	}
+	if !strings.Contains(msg, "truncated") {
+		t.Errorf("expected truncation marker, got %q", msg[:60])
+	}
+}
+
+func TestConfigFromEnvInsecureAndBadValues(t *testing.T) {
+	t.Setenv("TANDOOR_URL", "https://x.example")
+	t.Setenv("TANDOOR_TOKEN", "t")
+	t.Setenv("TANDOOR_INSECURE_SKIP_VERIFY", "true")
+	cfg, err := ConfigFromEnv()
+	if err != nil || !cfg.Insecure {
+		t.Fatalf("Insecure = %v, err = %v", cfg.Insecure, err)
+	}
+	t.Setenv("TANDOOR_INSECURE_SKIP_VERIFY", "nonsense")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Error("expected error for bad TANDOOR_INSECURE_SKIP_VERIFY")
+	}
+	t.Setenv("TANDOOR_INSECURE_SKIP_VERIFY", "")
+	t.Setenv("TANDOOR_TIMEOUT", "-3")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Error("expected error for negative TANDOOR_TIMEOUT")
+	}
+}
 
 // newTestClient points a Client at an httptest server.
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {

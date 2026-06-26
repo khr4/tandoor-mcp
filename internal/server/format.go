@@ -21,31 +21,48 @@ type named struct {
 }
 
 // flexNum tolerates JSON numbers, decimal strings ("2.00") and null, which
-// Tandoor uses interchangeably for decimal fields depending on settings.
+// Tandoor uses interchangeably for decimal fields depending on settings. A value
+// that is present but not a plain number is kept in Raw and rendered verbatim,
+// so an unexpected format is surfaced honestly rather than silently dropped.
 type flexNum struct {
-	Set   bool
-	Value float64
+	Set   bool    // true when Value holds a parsed number
+	Value float64 // parsed numeric value (valid only when Set)
+	Raw   string  // original token when present but non-numeric
 }
 
 func (f *flexNum) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(string(b), `"`)
+	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(b)), `"`))
 	if s == "" || s == "null" {
 		return nil
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return nil // tolerate unexpected formats rather than failing a whole decode
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		f.Value, f.Set = v, true
+		return nil
 	}
-	f.Value, f.Set = v, true
+	f.Raw = s
 	return nil
 }
 
-// String renders a number without trailing zeros: 2, 1.5, 0.25.
+// String renders a number without trailing zeros (2, 1.5, 0.25), or the raw
+// token if the value was present but not numeric.
 func (f flexNum) String() string {
-	if !f.Set {
-		return ""
+	if f.Set {
+		return strconv.FormatFloat(f.Value, 'f', -1, 64)
 	}
-	return strconv.FormatFloat(f.Value, 'f', -1, 64)
+	return f.Raw
+}
+
+// scaleAmounts multiplies every numeric ingredient amount in r by factor, used
+// to render a recipe at a different serving count.
+func scaleAmounts(r *apiRecipe, factor float64) {
+	for si := range r.Steps {
+		for ii := range r.Steps[si].Ingredients {
+			a := &r.Steps[si].Ingredients[ii].Amount
+			if a.Set {
+				a.Value *= factor
+			}
+		}
+	}
 }
 
 type apiUnit struct {

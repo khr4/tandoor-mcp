@@ -5,23 +5,28 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// resolve validates a resource name against the catalog.
+// resolve validates a resource name against the catalog and the sensitive denylist.
 func resolve(name string) (Resource, error) {
-	r, ok := lookupResource(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	if sensitiveResources[name] {
+		return Resource{}, fmt.Errorf("resource %q is restricted and not available through the generic tools", name)
+	}
+	r, ok := lookupResource(name)
 	if !ok {
 		return Resource{}, fmt.Errorf("unknown resource %q; call tandoor_resources for the catalog", name)
 	}
 	return r, nil
 }
 
-// Resources returns the resource catalog.
-func (h *handlers) Resources(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+// resourceCatalog returns the resource catalog.
+func (h *handlers) resourceCatalog(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 	return jsonResult(resources)
 }
 
@@ -34,8 +39,8 @@ type listInput struct {
 	Filters  map[string]string `json:"filters,omitempty" jsonschema:"extra query parameters passed verbatim (e.g. {\"updatedon_gte\":\"2024-01-01\"})"`
 }
 
-// List lists/searches a resource collection.
-func (h *handlers) List(ctx context.Context, _ *mcp.CallToolRequest, in listInput) (*mcp.CallToolResult, any, error) {
+// genericList lists/searches a resource collection.
+func (h *handlers) genericList(ctx context.Context, _ *mcp.CallToolRequest, in listInput) (*mcp.CallToolResult, any, error) {
 	r, err := resolve(in.Resource)
 	if err != nil {
 		return nil, nil, err
@@ -68,8 +73,8 @@ type getInput struct {
 	ID       string `json:"id" jsonschema:"object id (primary key)"`
 }
 
-// Get fetches one object by id.
-func (h *handlers) Get(ctx context.Context, _ *mcp.CallToolRequest, in getInput) (*mcp.CallToolResult, any, error) {
+// genericGet fetches one object by id.
+func (h *handlers) genericGet(ctx context.Context, _ *mcp.CallToolRequest, in getInput) (*mcp.CallToolResult, any, error) {
 	r, err := resolve(in.Resource)
 	if err != nil {
 		return nil, nil, err
@@ -86,8 +91,8 @@ type createInput struct {
 	Data     map[string]any `json:"data" jsonschema:"object fields to set, matching the resource's Tandoor serializer"`
 }
 
-// Create creates an object.
-func (h *handlers) Create(ctx context.Context, _ *mcp.CallToolRequest, in createInput) (*mcp.CallToolResult, any, error) {
+// genericCreate creates an object.
+func (h *handlers) genericCreate(ctx context.Context, _ *mcp.CallToolRequest, in createInput) (*mcp.CallToolResult, any, error) {
 	r, err := resolve(in.Resource)
 	if err != nil {
 		return nil, nil, err
@@ -109,8 +114,8 @@ type updateInput struct {
 	Full     bool           `json:"full,omitempty" jsonschema:"replace the entire object with PUT instead of a partial PATCH"`
 }
 
-// Update updates an object (PATCH by default, PUT when Full).
-func (h *handlers) Update(ctx context.Context, _ *mcp.CallToolRequest, in updateInput) (*mcp.CallToolResult, any, error) {
+// genericUpdate updates an object (PATCH by default, PUT when Full).
+func (h *handlers) genericUpdate(ctx context.Context, _ *mcp.CallToolRequest, in updateInput) (*mcp.CallToolResult, any, error) {
 	r, err := resolve(in.Resource)
 	if err != nil {
 		return nil, nil, err
@@ -134,8 +139,8 @@ type deleteInput struct {
 	ID       string `json:"id" jsonschema:"object id to delete"`
 }
 
-// Delete removes an object.
-func (h *handlers) Delete(ctx context.Context, _ *mcp.CallToolRequest, in deleteInput) (*mcp.CallToolResult, any, error) {
+// genericDelete removes an object.
+func (h *handlers) genericDelete(ctx context.Context, _ *mcp.CallToolRequest, in deleteInput) (*mcp.CallToolResult, any, error) {
 	r, err := resolve(in.Resource)
 	if err != nil {
 		return nil, nil, err
@@ -143,7 +148,7 @@ func (h *handlers) Delete(ctx context.Context, _ *mcp.CallToolRequest, in delete
 	if _, err := h.c.Do(ctx, http.MethodDelete, objectPath(r, in.ID), nil, nil); err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("deleted %s %s", r.Name, in.ID))
+	return jsonResult(map[string]any{"status": "deleted", "resource": r.Name, "id": in.ID})
 }
 
 type actionInput struct {
@@ -153,16 +158,16 @@ type actionInput struct {
 	Body   map[string]any    `json:"body,omitempty" jsonschema:"JSON request body for POST/PUT/PATCH"`
 }
 
-// Action calls an arbitrary API endpoint.
-func (h *handlers) Action(ctx context.Context, _ *mcp.CallToolRequest, in actionInput) (*mcp.CallToolResult, any, error) {
+// genericAction calls an arbitrary API endpoint.
+func (h *handlers) genericAction(ctx context.Context, _ *mcp.CallToolRequest, in actionInput) (*mcp.CallToolResult, any, error) {
 	method := strings.ToUpper(strings.TrimSpace(in.Method))
 	switch method {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
 		return nil, nil, fmt.Errorf("unsupported method %q", in.Method)
 	}
-	if strings.TrimSpace(in.Path) == "" {
-		return nil, nil, fmt.Errorf("path is required")
+	if err := validateActionPath(in.Path); err != nil {
+		return nil, nil, err
 	}
 	q := url.Values{}
 	for k, v := range in.Query {
@@ -177,6 +182,24 @@ func (h *handlers) Action(ctx context.Context, _ *mcp.CallToolRequest, in action
 		return nil, nil, err
 	}
 	return rawResult(raw)
+}
+
+// validateActionPath rejects empty paths, parent-directory traversal, and
+// sensitive resources reached by their first segment.
+func validateActionPath(p string) error {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return fmt.Errorf("path is required")
+	}
+	clean := strings.TrimPrefix(strings.Trim(p, "/"), "api/")
+	segs := strings.Split(clean, "/")
+	if slices.Contains(segs, "..") {
+		return fmt.Errorf("path may not contain '..' segments")
+	}
+	if len(segs) > 0 && sensitiveResources[segs[0]] {
+		return fmt.Errorf("endpoint %q is restricted", segs[0])
+	}
+	return nil
 }
 
 // objectPath builds the detail route for an object, e.g. "recipe/5/".

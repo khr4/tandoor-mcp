@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,17 +27,48 @@ type shoppingItem struct {
 }
 
 func (e apiShoppingEntry) line() string {
-	var parts []string
-	if a := e.Amount.String(); a != "" && a != "0" {
-		parts = append(parts, a)
+	ing := apiIngredient{Amount: e.Amount}
+	if e.Unit != nil {
+		ing.Unit = &apiUnit{Name: e.Unit.Name}
 	}
-	if e.Unit != nil && e.Unit.Name != "" {
-		parts = append(parts, e.Unit.Name)
+	if e.Food != nil {
+		ing.Food = &apiFood{Name: e.Food.Name}
 	}
-	if e.Food != nil && e.Food.Name != "" {
-		parts = append(parts, e.Food.Name)
+	return formatIngredient(ing)
+}
+
+// shoppingEntries fetches all shopping list entries, following pagination.
+func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, error) {
+	var all []apiShoppingEntry
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("page_size", "200")
+		raw, err := h.c.Do(ctx, http.MethodGet, "shopping-list-entry/", q, nil)
+		if err != nil {
+			return nil, err
+		}
+		var env listEnvelope
+		if err := json.Unmarshal(raw, &env); err == nil && len(env.Results) > 0 {
+			var batch []apiShoppingEntry
+			if err := json.Unmarshal(env.Results, &batch); err != nil {
+				return nil, fmt.Errorf("decoding shopping list: %w", err)
+			}
+			all = append(all, batch...)
+			if env.Next == nil || *env.Next == "" {
+				break
+			}
+			continue
+		}
+		// Not a paginated envelope (bare array, or empty): decode once and stop.
+		var batch []apiShoppingEntry
+		if err := decodeList(raw, &batch); err != nil {
+			return nil, fmt.Errorf("decoding shopping list: %w", err)
+		}
+		all = append(all, batch...)
+		break
 	}
-	return strings.Join(parts, " ")
+	return all, nil
 }
 
 // ---- get_shopping_list ----
@@ -43,8 +77,8 @@ type getShoppingInput struct {
 	IncludeChecked *bool `json:"include_checked,omitempty" jsonschema:"include items already checked off (default false)"`
 }
 
-// GetShoppingList returns current shopping list entries as readable lines.
-func (h *handlers) GetShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in getShoppingInput) (*mcp.CallToolResult, any, error) {
+// getShoppingList returns current shopping list entries as readable lines.
+func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in getShoppingInput) (*mcp.CallToolResult, any, error) {
 	entries, err := h.shoppingEntries(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -60,18 +94,6 @@ func (h *handlers) GetShoppingList(ctx context.Context, _ *mcp.CallToolRequest, 
 	return jsonResult(items)
 }
 
-func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, error) {
-	raw, err := h.c.Do(ctx, http.MethodGet, "shopping-list-entry/", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	var entries []apiShoppingEntry
-	if err := decodeList(raw, &entries); err != nil {
-		return nil, fmt.Errorf("decoding shopping list: %w", err)
-	}
-	return entries, nil
-}
-
 // ---- add_to_shopping_list ----
 
 type addShoppingInput struct {
@@ -80,8 +102,8 @@ type addShoppingInput struct {
 	Unit   string   `json:"unit,omitempty" jsonschema:"unit name for the amount, e.g. g, cup"`
 }
 
-// AddToShoppingList adds an ad-hoc food to the shopping list.
-func (h *handlers) AddToShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in addShoppingInput) (*mcp.CallToolResult, any, error) {
+// addToShoppingList adds an ad-hoc food to the shopping list.
+func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in addShoppingInput) (*mcp.CallToolResult, any, error) {
 	if strings.TrimSpace(in.Food) == "" {
 		return nil, nil, fmt.Errorf("food is required")
 	}
@@ -97,27 +119,34 @@ func (h *handlers) AddToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	if u := strings.TrimSpace(in.Unit); u != "" {
 		body["unit"] = map[string]any{"name": u}
 	}
-	if _, err := h.c.Do(ctx, http.MethodPost, "shopping-list-entry/", nil, body); err != nil {
+	raw, err := h.c.Do(ctx, http.MethodPost, "shopping-list-entry/", nil, body)
+	if err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("added %s to the shopping list", in.Food))
+	var created apiShoppingEntry
+	_ = json.Unmarshal(raw, &created)
+	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": in.Food})
 }
 
 // ---- add_recipe_to_shopping ----
 
 type addRecipeShoppingInput struct {
-	RecipeID int  `json:"recipe_id" jsonschema:"recipe whose ingredients to add"`
-	Servings *int `json:"servings,omitempty" jsonschema:"servings to scale the amounts to"`
+	Recipe   string `json:"recipe" jsonschema:"recipe name or id whose ingredients to add"`
+	Servings *int   `json:"servings,omitempty" jsonschema:"servings to scale the amounts to"`
 }
 
-// AddRecipeToShopping adds all of a recipe's ingredients to the shopping list.
-func (h *handlers) AddRecipeToShopping(ctx context.Context, _ *mcp.CallToolRequest, in addRecipeShoppingInput) (*mcp.CallToolResult, any, error) {
-	body := map[string]any{}
-	setInt(body, "servings", in.Servings)
-	if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("recipe/%d/shopping/", in.RecipeID), nil, body); err != nil {
+// addRecipeToShopping adds all of a recipe's ingredients to the shopping list.
+func (h *handlers) addRecipeToShopping(ctx context.Context, _ *mcp.CallToolRequest, in addRecipeShoppingInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("added ingredients of recipe %d to the shopping list", in.RecipeID))
+	body := map[string]any{}
+	setInt(body, "servings", in.Servings)
+	if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("recipe/%d/shopping/", id), nil, body); err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"status": "added", "recipe_id": id})
 }
 
 // ---- update_shopping_item ----
@@ -128,8 +157,8 @@ type updateShoppingInput struct {
 	Amount  *float64 `json:"amount,omitempty" jsonschema:"new quantity"`
 }
 
-// UpdateShoppingItem checks off or edits a single shopping list entry.
-func (h *handlers) UpdateShoppingItem(ctx context.Context, _ *mcp.CallToolRequest, in updateShoppingInput) (*mcp.CallToolResult, any, error) {
+// updateShoppingItem checks off or edits a single shopping list entry.
+func (h *handlers) updateShoppingItem(ctx context.Context, _ *mcp.CallToolRequest, in updateShoppingInput) (*mcp.CallToolResult, any, error) {
 	body := map[string]any{}
 	if in.Checked != nil {
 		body["checked"] = *in.Checked
@@ -143,7 +172,7 @@ func (h *handlers) UpdateShoppingItem(ctx context.Context, _ *mcp.CallToolReques
 	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("shopping-list-entry/%d/", in.ID), nil, body); err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("updated shopping list entry %d", in.ID))
+	return jsonResult(map[string]any{"status": "updated", "id": in.ID})
 }
 
 // ---- clear_shopping_list ----
@@ -152,20 +181,27 @@ type clearShoppingInput struct {
 	OnlyChecked *bool `json:"only_checked,omitempty" jsonschema:"only remove checked-off items (default true)"`
 }
 
-// ClearShoppingList removes shopping list entries.
-func (h *handlers) ClearShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in clearShoppingInput) (*mcp.CallToolResult, any, error) {
+// clearShoppingList removes shopping list entries, reporting the true count even
+// if some deletions fail.
+func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in clearShoppingInput) (*mcp.CallToolResult, any, error) {
 	onlyChecked := in.OnlyChecked == nil || *in.OnlyChecked
 	entries, err := h.shoppingEntries(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	removed := 0
+	var failures []string
 	for _, e := range entries {
 		if onlyChecked && !e.Checked {
 			continue
 		}
+		if ctx.Err() != nil {
+			failures = append(failures, ctx.Err().Error())
+			break
+		}
 		if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("shopping-list-entry/%d/", e.ID), nil, nil); err != nil {
-			return nil, nil, fmt.Errorf("removing entry %d: %w", e.ID, err)
+			failures = append(failures, fmt.Sprintf("entry %d: %v", e.ID, err))
+			continue
 		}
 		removed++
 	}
@@ -173,5 +209,10 @@ func (h *handlers) ClearShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	if onlyChecked {
 		scope = "checked-off items"
 	}
-	return textResult(fmt.Sprintf("removed %d %s from the shopping list", removed, scope))
+	out := map[string]any{"status": "cleared", "removed": removed, "scope": scope}
+	if len(failures) > 0 {
+		out["status"] = "partial"
+		out["failures"] = failures
+	}
+	return jsonResult(out)
 }

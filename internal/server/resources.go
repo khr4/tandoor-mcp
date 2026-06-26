@@ -13,7 +13,7 @@ type Resource struct {
 // from cookbook/urls.py. The generic tools accept any name listed here; the API
 // itself enforces which verbs each collection supports (returning 405 otherwise).
 var resources = []Resource{
-	{"recipe", "recipe", "Recipes. Prefer recipe_search for filtered queries."},
+	{"recipe", "recipe", "Recipes. Prefer find_recipes / get_recipe for searching and reading."},
 	{"recipe-book", "recipe-book", "Recipe books (collections of recipes)."},
 	{"recipe-book-entry", "recipe-book-entry", "Membership linking a recipe to a recipe book."},
 	{"recipe-import", "recipe-import", "Recipes discovered in synced storage, pending import."},
@@ -74,6 +74,16 @@ var resourceByName = func() map[string]Resource {
 	}
 	return m
 }()
+
+// sensitiveResources hold credentials or other secrets and must not be reachable
+// through the generic tools, which return response bodies verbatim to the model.
+var sensitiveResources = map[string]bool{
+	"storage":          true,
+	"ai-provider":      true,
+	"ai-log":           true,
+	"access-token":     true,
+	"connector-config": true,
+}
 
 func lookupResource(name string) (Resource, bool) {
 	r, ok := resourceByName[name]

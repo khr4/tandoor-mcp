@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -20,7 +21,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// maxResponseBytes caps how much of any response body the client buffers, so a
+// malicious or buggy instance cannot exhaust memory.
+const maxResponseBytes = 32 << 20
+
+// maxErrorBodyRunes bounds how much of an error response body is echoed back.
+const maxErrorBodyRunes = 4000
 
 // Config holds everything needed to talk to a Tandoor instance.
 type Config struct {
@@ -94,6 +103,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	hc := &http.Client{Timeout: timeout}
 	if cfg.Insecure {
+		log.Printf("warning: TLS certificate verification disabled; the API token is exposed to network interception")
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	return &Client{base: base, token: cfg.Token, http: hc}, nil
@@ -110,8 +120,8 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	body := strings.TrimSpace(e.Body)
-	if len(body) > 4000 {
-		body = body[:4000] + "…(truncated)"
+	if utf8.RuneCountInString(body) > maxErrorBodyRunes {
+		body = string([]rune(body)[:maxErrorBodyRunes]) + "…(truncated)"
 	}
 	msg := fmt.Sprintf("tandoor API %s %s -> %d %s", e.Method, e.Path, e.StatusCode, http.StatusText(e.StatusCode))
 	if body != "" {
@@ -181,9 +191,12 @@ func (c *Client) send(req *http.Request, method, path string) (json.RawMessage, 
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s %s response: %w", method, path, err)
+	}
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("%s %s: response exceeds %d bytes", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, &APIError{StatusCode: resp.StatusCode, Method: method, Path: path, Body: string(data)}

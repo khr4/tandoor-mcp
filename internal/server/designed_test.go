@@ -169,7 +169,7 @@ func TestCreateRecipeParsesLinesAndPostsExplicitQuantities(t *testing.T) {
 	})
 
 	egg := 3.0
-	_, _, err := h.CreateRecipe(context.Background(), nil, createRecipeInput{
+	_, _, err := h.createRecipe(context.Background(), nil, createRecipeInput{
 		Name:     "Pancakes",
 		Keywords: []string{"Breakfast"},
 		Steps: []stepInput{{
@@ -181,7 +181,7 @@ func TestCreateRecipeParsesLinesAndPostsExplicitQuantities(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("CreateRecipe: %v", err)
+		t.Fatalf("createRecipe: %v", err)
 	}
 	if !parserCalled {
 		t.Error("ingredient parser was not called for the natural-language line")
@@ -226,15 +226,15 @@ func TestFindRecipesResolvesKeywordsAndWarns(t *testing.T) {
 		}
 	})
 
-	res, _, err := h.FindRecipes(context.Background(), nil, findRecipesInput{
+	res, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{
 		Text:     "tofu",
 		Keywords: []string{"Vegan", "Nonexistent"},
 	})
 	if err != nil {
-		t.Fatalf("FindRecipes: %v", err)
+		t.Fatalf("findRecipes: %v", err)
 	}
-	if !strings.Contains(recipeQuery, "keywords=7") || strings.Count(recipeQuery, "keywords=") != 1 {
-		t.Errorf("recipe query = %q, want single keywords=7", recipeQuery)
+	if !strings.Contains(recipeQuery, "keywords_and=7") || strings.Count(recipeQuery, "keywords_and=") != 1 {
+		t.Errorf("recipe query = %q, want single keywords_and=7 (AND semantics)", recipeQuery)
 	}
 	if !strings.Contains(recipeQuery, "query=tofu") {
 		t.Errorf("recipe query = %q, want query=tofu", recipeQuery)
@@ -267,7 +267,7 @@ func TestImportSavesScrapedRecipe(t *testing.T) {
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
 	})
-	res, _, err := h.ImportRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/soup"})
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/soup"})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -292,39 +292,42 @@ func TestImportPreviewDoesNotSave(t *testing.T) {
 		_, _ = io.WriteString(w, `{"recipe":{"name":"Soup","steps":[]},"images":[],"duplicates":[]}`)
 	})
 	save := false
-	res, _, err := h.ImportRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x", Save: &save})
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x", Save: &save})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
 	if posted {
 		t.Error("preview must not POST to /api/recipe/")
 	}
-	if !strings.Contains(resultText(t, res), "PREVIEW") {
+	if !strings.Contains(resultText(t, res), `"status": "preview"`) {
 		t.Errorf("expected preview, got %s", resultText(t, res))
 	}
 }
 
 // ---- plan_meal ----
 
-func TestPlanMealNormalizesDateAndNests(t *testing.T) {
+func TestPlanMealSendsDatetimeBareIntAndDefaultServings(t *testing.T) {
 	var body map[string]any
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		body = decodeBody(t, r)
 		_, _ = io.WriteString(w, `{"id":3,"from_date":"2026-07-01T00:00:00","meal_type":{"name":"Dinner"},"recipe":{"id":5,"name":"Tofu"}}`)
 	})
-	five := 5
-	_, _, err := h.PlanMeal(context.Background(), nil, planMealInput{Date: "2026-07-01", MealType: "Dinner", RecipeID: &five})
+	// recipe "5" is a numeric reference, so no lookup HTTP is needed.
+	_, _, err := h.planMeal(context.Background(), nil, planMealInput{Date: "2026-07-01", MealType: "Dinner", Recipe: "5"})
 	if err != nil {
-		t.Fatalf("PlanMeal: %v", err)
+		t.Fatalf("planMeal: %v", err)
 	}
 	if at(t, body, "from_date") != "2026-07-01T00:00:00" {
-		t.Errorf("from_date = %v", at(t, body, "from_date"))
+		t.Errorf("from_date = %v, want datetime (DateTimeField rejects date-only)", at(t, body, "from_date"))
 	}
 	if at(t, body, "meal_type", "name") != "Dinner" {
 		t.Errorf("meal_type = %v", at(t, body, "meal_type"))
 	}
-	if at(t, body, "recipe", "id") != 5.0 {
-		t.Errorf("recipe id = %v", at(t, body, "recipe", "id"))
+	if at(t, body, "recipe") != 5.0 {
+		t.Errorf("recipe = %v, want bare int 5", at(t, body, "recipe"))
+	}
+	if at(t, body, "servings") != 1.0 {
+		t.Errorf("servings = %v, want default 1", at(t, body, "servings"))
 	}
 }
 
@@ -337,9 +340,9 @@ func TestAddToShoppingListBody(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":1}`)
 	})
 	amt := 2.0
-	_, _, err := h.AddToShoppingList(context.Background(), nil, addShoppingInput{Food: "milk", Amount: &amt, Unit: "l"})
+	_, _, err := h.addToShoppingList(context.Background(), nil, addShoppingInput{Food: "milk", Amount: &amt, Unit: "l"})
 	if err != nil {
-		t.Fatalf("AddToShoppingList: %v", err)
+		t.Fatalf("addToShoppingList: %v", err)
 	}
 	if at(t, body, "food", "name") != "milk" || at(t, body, "amount") != 2.0 || at(t, body, "unit", "name") != "l" {
 		t.Errorf("body wrong: %v", body)
@@ -353,9 +356,9 @@ func TestGetShoppingListFiltersChecked(t *testing.T) {
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `[{"id":1,"amount":"2","unit":{"name":"l"},"food":{"name":"milk"},"checked":false},{"id":2,"amount":"1","food":{"name":"bread"},"checked":true}]`)
 	})
-	res, _, err := h.GetShoppingList(context.Background(), nil, getShoppingInput{})
+	res, _, err := h.getShoppingList(context.Background(), nil, getShoppingInput{})
 	if err != nil {
-		t.Fatalf("GetShoppingList: %v", err)
+		t.Fatalf("getShoppingList: %v", err)
 	}
 	var items []shoppingItem
 	if err := json.Unmarshal([]byte(resultText(t, res)), &items); err != nil {
@@ -368,29 +371,33 @@ func TestGetShoppingListFiltersChecked(t *testing.T) {
 
 // ---- pantry ----
 
-func TestSetFoodOnHandResolvesAndPatches(t *testing.T) {
+func TestSetFoodOnHandGetOrCreatesAndPatches(t *testing.T) {
 	var patchPath string
-	var body map[string]any
+	var postBody, patchBody map[string]any
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/food/":
-			_, _ = io.WriteString(w, `{"results":[{"id":4,"name":"Milk"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/food/":
+			postBody = decodeBody(t, r) // server-side get-or-create by name
+			_, _ = io.WriteString(w, `{"id":4,"name":"Milk"}`)
 		case r.Method == http.MethodPatch:
 			patchPath = r.URL.Path
-			body = decodeBody(t, r)
+			patchBody = decodeBody(t, r)
 			_, _ = io.WriteString(w, `{"id":4}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	_, _, err := h.SetFoodOnHand(context.Background(), nil, setOnhandInput{Food: "Milk"})
+	_, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "Milk"})
 	if err != nil {
-		t.Fatalf("SetFoodOnHand: %v", err)
+		t.Fatalf("setFoodOnHand: %v", err)
+	}
+	if at(t, postBody, "name") != "Milk" {
+		t.Errorf("create body = %v, want name=Milk", postBody)
 	}
 	if patchPath != "/api/food/4/" {
 		t.Errorf("patch path = %q, want /api/food/4/", patchPath)
 	}
-	if at(t, body, "food_onhand") != true {
-		t.Errorf("food_onhand = %v, want true", at(t, body, "food_onhand"))
+	if at(t, patchBody, "food_onhand") != true {
+		t.Errorf("food_onhand = %v, want true", at(t, patchBody, "food_onhand"))
 	}
 }

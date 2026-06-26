@@ -3,15 +3,23 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/khr4/tandoor-mcp/internal/tandoor"
 )
+
+// maxImageBytes caps the size of a local image upload.
+const maxImageBytes = 16 << 20
 
 // ---- find_recipes ----
 
@@ -34,27 +42,21 @@ type findRecipesOutput struct {
 	Recipes  []recipeCard `json:"recipes"`
 }
 
-// FindRecipes searches recipes using names (resolved to ids) and returns compact cards.
-func (h *handlers) FindRecipes(ctx context.Context, _ *mcp.CallToolRequest, in findRecipesInput) (*mcp.CallToolResult, any, error) {
+// findRecipes searches recipes using names (resolved to ids) and returns compact cards.
+func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in findRecipesInput) (*mcp.CallToolResult, any, error) {
 	q := url.Values{}
 	addStr(q, "query", in.Text)
 
 	var warnings []string
 	if len(in.Keywords) > 0 {
-		ids, missing, err := h.resolveExistingIDs(ctx, "keyword", in.Keywords)
-		if err != nil {
-			return nil, nil, err
-		}
-		addInts(q, "keywords", ids)
-		warnings = appendMissing(warnings, "keyword", missing)
+		ids, w := h.resolveExistingIDs(ctx, "keyword", "keyword", in.Keywords)
+		addInts(q, "keywords_and", ids) // _and = match ALL (bare param is OR)
+		warnings = append(warnings, w...)
 	}
 	if len(in.Ingredients) > 0 {
-		ids, missing, err := h.resolveExistingIDs(ctx, "food", in.Ingredients)
-		if err != nil {
-			return nil, nil, err
-		}
-		addInts(q, "foods", ids)
-		warnings = appendMissing(warnings, "ingredient", missing)
+		ids, w := h.resolveExistingIDs(ctx, "food", "ingredient", in.Ingredients)
+		addInts(q, "foods_and", ids)
+		warnings = append(warnings, w...)
 	}
 	if in.Book != "" {
 		id, found, err := h.resolveExistingID(ctx, "recipe-book", in.Book)
@@ -62,14 +64,13 @@ func (h *handlers) FindRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 			return nil, nil, err
 		}
 		if found {
-			q.Set("books", fmt.Sprintf("%d", id))
+			q.Set("books_and", strconv.Itoa(id))
 		} else {
-			warnings = append(warnings, fmt.Sprintf("recipe book %q not found", in.Book))
+			warnings = append(warnings, fmt.Sprintf("recipe book %q not found; ignored as a filter", in.Book))
 		}
 	}
 	addInt(q, "rating_gte", in.MinRating)
 	addBool(q, "makenow", in.MakeableNow)
-	addBool(q, "new", in.Newest)
 	addBool(q, "random", in.Random)
 	if in.Newest != nil && *in.Newest {
 		q.Set("sort_order", "-created_at")
@@ -78,7 +79,7 @@ func (h *handlers) FindRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 	if in.Limit != nil && *in.Limit > 0 {
 		limit = *in.Limit
 	}
-	q.Set("page_size", fmt.Sprintf("%d", limit))
+	q.Set("page_size", strconv.Itoa(limit))
 
 	raw, err := h.c.Do(ctx, http.MethodGet, "recipe/", q, nil)
 	if err != nil {
@@ -101,13 +102,30 @@ func (h *handlers) FindRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 
 // ---- get_recipe ----
 
-type recipeIDInput struct {
-	ID int `json:"id" jsonschema:"recipe id"`
+type getRecipeInput struct {
+	Recipe   string `json:"recipe" jsonschema:"recipe name or numeric id"`
+	Servings *int   `json:"servings,omitempty" jsonschema:"re-scale ingredient amounts to this serving count"`
 }
 
-// GetRecipe returns one recipe rendered as readable Markdown.
-func (h *handlers) GetRecipe(ctx context.Context, _ *mcp.CallToolRequest, in recipeIDInput) (*mcp.CallToolResult, any, error) {
-	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/", in.ID), nil, nil)
+type getRecipeOutput struct {
+	ID             int      `json:"id"`
+	Name           string   `json:"name"`
+	Rating         string   `json:"rating,omitempty"`
+	Servings       string   `json:"servings,omitempty"`
+	WorkingTimeMin string   `json:"working_time_min,omitempty"`
+	WaitingTimeMin string   `json:"waiting_time_min,omitempty"`
+	Keywords       []string `json:"keywords,omitempty"`
+	SourceURL      string   `json:"source_url,omitempty"`
+	Markdown       string   `json:"markdown"`
+}
+
+// getRecipe returns one recipe as structured fields plus a readable Markdown view.
+func (h *handlers) getRecipe(ctx context.Context, _ *mcp.CallToolRequest, in getRecipeInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/", id), nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -115,20 +133,30 @@ func (h *handlers) GetRecipe(ctx context.Context, _ *mcp.CallToolRequest, in rec
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, nil, fmt.Errorf("decoding recipe: %w", err)
 	}
-	return textResult(renderRecipe(r))
+	if in.Servings != nil && *in.Servings > 0 && r.Servings.Set && r.Servings.Value > 0 {
+		scaleAmounts(&r, float64(*in.Servings)/r.Servings.Value)
+		r.Servings = flexNum{Set: true, Value: float64(*in.Servings)}
+	}
+	return jsonResult(getRecipeOutput{
+		ID: r.ID, Name: r.Name, Rating: r.Rating.String(), Servings: r.Servings.String(),
+		WorkingTimeMin: r.WorkingTime.String(), WaitingTimeMin: r.WaitingTime.String(),
+		Keywords: keywordNames(r.Keywords), SourceURL: r.SourceURL, Markdown: renderRecipe(r),
+	})
 }
 
 // ---- create_recipe ----
 
 type createRecipeInput struct {
-	Name        string      `json:"name" jsonschema:"recipe name"`
-	Description string      `json:"description,omitempty"`
-	Servings    *int        `json:"servings,omitempty" jsonschema:"number of servings the ingredient amounts make"`
-	WorkingTime *int        `json:"working_time,omitempty" jsonschema:"active/prep time in minutes"`
-	WaitingTime *int        `json:"waiting_time,omitempty" jsonschema:"waiting/cooking time in minutes"`
-	SourceURL   string      `json:"source_url,omitempty"`
-	Keywords    []string    `json:"keywords,omitempty" jsonschema:"tag names; created if they do not exist"`
-	Steps       []stepInput `json:"steps,omitempty" jsonschema:"ordered preparation steps and their ingredients"`
+	Name         string            `json:"name" jsonschema:"recipe name"`
+	Description  string            `json:"description,omitempty" jsonschema:"free-text description"`
+	Servings     *int              `json:"servings,omitempty" jsonschema:"number of servings the ingredient amounts make"`
+	WorkingTime  *int              `json:"working_time,omitempty" jsonschema:"active/prep time in minutes"`
+	WaitingTime  *int              `json:"waiting_time,omitempty" jsonschema:"waiting/cooking time in minutes"`
+	SourceURL    string            `json:"source_url,omitempty" jsonschema:"original source URL, if any"`
+	Keywords     []string          `json:"keywords,omitempty" jsonschema:"tag names; created if they do not exist"`
+	Ingredients  []ingredientInput `json:"ingredients,omitempty" jsonschema:"ingredients for a simple one-step recipe; for multi-step recipes use steps instead"`
+	Instructions string            `json:"instructions,omitempty" jsonschema:"instruction text for the single step when using the top-level ingredients field"`
+	Steps        []stepInput       `json:"steps,omitempty" jsonschema:"ordered steps each with their own ingredients (use instead of top-level ingredients/instructions)"`
 }
 
 type createRecipeOutput struct {
@@ -139,13 +167,17 @@ type createRecipeOutput struct {
 	Keywords []string `json:"keywords,omitempty"`
 }
 
-// CreateRecipe creates a recipe, splitting quantities out of natural-language
+// createRecipe creates a recipe, splitting quantities out of natural-language
 // ingredient lines and get-or-creating foods, units and keywords by name.
-func (h *handlers) CreateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in createRecipeInput) (*mcp.CallToolResult, any, error) {
+func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in createRecipeInput) (*mcp.CallToolResult, any, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, nil, fmt.Errorf("name is required")
 	}
-	steps, err := h.buildSteps(ctx, in.Steps)
+	stepInputs := in.Steps
+	if len(stepInputs) == 0 && (len(in.Ingredients) > 0 || in.Instructions != "") {
+		stepInputs = []stepInput{{Instruction: in.Instructions, Ingredients: in.Ingredients}}
+	}
+	steps, err := h.buildSteps(ctx, stepInputs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -182,7 +214,7 @@ func (h *handlers) CreateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 // ---- import_recipe_from_url ----
 
 type importRecipeInput struct {
-	URL  string `json:"url" jsonschema:"recipe web page URL to import"`
+	URL  string `json:"url" jsonschema:"recipe web page URL to import (http/https)"`
 	Save *bool  `json:"save,omitempty" jsonschema:"save to your collection (default true); false returns a parsed preview only"`
 }
 
@@ -210,32 +242,41 @@ type sourceRecipe struct {
 }
 
 type importRecipeOutput struct {
-	ID             int     `json:"id,omitempty"`
-	Name           string  `json:"name"`
-	Status         string  `json:"status"`
-	Source         string  `json:"source"`
-	ImageAvailable bool    `json:"image_available"`
-	Duplicates     []named `json:"duplicates,omitempty"`
-	Note           string  `json:"note,omitempty"`
+	ID         int      `json:"id,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	Status     string   `json:"status"`
+	Source     string   `json:"source,omitempty"`
+	ImageURL   string   `json:"image_url,omitempty"`
+	Duplicates []named  `json:"duplicates,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
+	Markdown   string   `json:"markdown,omitempty"`
 }
 
-// ImportRecipeFromURL scrapes a recipe and (by default) saves it.
-func (h *handlers) ImportRecipeFromURL(ctx context.Context, _ *mcp.CallToolRequest, in importRecipeInput) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(in.URL) == "" {
-		return nil, nil, fmt.Errorf("url is required")
+// importRecipeFromURL scrapes a recipe and (by default) saves it.
+func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolRequest, in importRecipeInput) (*mcp.CallToolResult, any, error) {
+	if err := validateHTTPURL(in.URL); err != nil {
+		return nil, nil, err
 	}
 	raw, err := h.c.Do(ctx, http.MethodPost, "recipe-from-source/", nil, map[string]any{"url": in.URL})
 	if err != nil {
+		if msg, ok := importErrorMessage(err); ok {
+			return textResult("could not import: " + msg)
+		}
 		return nil, nil, err
 	}
 	var resp struct {
 		Recipe     json.RawMessage `json:"recipe"`
+		RecipeID   *int            `json:"recipe_id"`
 		Error      bool            `json:"error"`
 		Msg        string          `json:"msg"`
 		Duplicates []named         `json:"duplicates"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, nil, fmt.Errorf("decoding scrape response: %w", err)
+	}
+	// YouTube / Tandoor-share URLs are saved server-side and return only an id.
+	if resp.RecipeID != nil && *resp.RecipeID > 0 {
+		return jsonResult(importRecipeOutput{ID: *resp.RecipeID, Status: "imported", Source: in.URL, Duplicates: resp.Duplicates})
 	}
 	if resp.Error || len(resp.Recipe) == 0 || string(resp.Recipe) == "null" {
 		msg := resp.Msg
@@ -249,19 +290,15 @@ func (h *handlers) ImportRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 		return nil, nil, fmt.Errorf("decoding parsed recipe: %w", err)
 	}
 
-	save := true
-	if in.Save != nil {
-		save = *in.Save
-	}
+	save := in.Save == nil || *in.Save
 	if !save {
-		preview := "PREVIEW (not saved)\n\n" + renderSourceRecipe(sr)
-		if len(resp.Duplicates) > 0 {
-			preview += "\nPossible duplicates already in your collection: " + namesJoin(resp.Duplicates)
-		}
-		return textResult(preview)
+		return jsonResult(importRecipeOutput{
+			Status: "preview", Name: sr.Name, Source: in.URL, ImageURL: sr.ImageURL,
+			Duplicates: resp.Duplicates, Markdown: renderSourceRecipe(sr),
+		})
 	}
 
-	body := sourceRecipeToBody(sr, in.URL)
+	body, warnings := sourceRecipeToBody(sr, in.URL)
 	created, err := h.c.Do(ctx, http.MethodPost, "recipe/", nil, body)
 	if err != nil {
 		return nil, nil, err
@@ -270,32 +307,32 @@ func (h *handlers) ImportRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	if err := json.Unmarshal(created, &rec); err != nil {
 		return nil, nil, fmt.Errorf("decoding imported recipe: %w", err)
 	}
-	out := importRecipeOutput{
+	return jsonResult(importRecipeOutput{
 		ID: rec.ID, Name: rec.Name, Status: "imported", Source: in.URL,
-		ImageAvailable: sr.ImageURL != "", Duplicates: resp.Duplicates,
-	}
-	if sr.ImageURL != "" {
-		out.Note = "the source has an image; call set_recipe_image with image_url to attach it"
-	}
-	return jsonResult(out)
+		ImageURL: sr.ImageURL, Duplicates: resp.Duplicates, Warnings: warnings,
+	})
 }
 
 // ---- update_recipe ----
 
 type updateRecipeInput struct {
-	ID             int      `json:"id" jsonschema:"recipe id"`
-	Name           *string  `json:"name,omitempty"`
-	Description    *string  `json:"description,omitempty"`
-	Servings       *int     `json:"servings,omitempty"`
+	Recipe         string   `json:"recipe" jsonschema:"recipe name or numeric id"`
+	Name           *string  `json:"name,omitempty" jsonschema:"new name"`
+	Description    *string  `json:"description,omitempty" jsonschema:"new description"`
+	Servings       *int     `json:"servings,omitempty" jsonschema:"new serving count"`
 	WorkingTime    *int     `json:"working_time,omitempty" jsonschema:"prep time in minutes"`
 	WaitingTime    *int     `json:"waiting_time,omitempty" jsonschema:"cooking/waiting time in minutes"`
-	SourceURL      *string  `json:"source_url,omitempty"`
+	SourceURL      *string  `json:"source_url,omitempty" jsonschema:"new source URL"`
 	AddKeywords    []string `json:"add_keywords,omitempty" jsonschema:"keyword names to add"`
 	RemoveKeywords []string `json:"remove_keywords,omitempty" jsonschema:"keyword names to remove"`
 }
 
-// UpdateRecipe applies targeted edits without resending the whole recipe.
-func (h *handlers) UpdateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in updateRecipeInput) (*mcp.CallToolResult, any, error) {
+// updateRecipe applies targeted edits without resending the whole recipe.
+func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in updateRecipeInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
 	body := map[string]any{}
 	if in.Name != nil {
 		body["name"] = *in.Name
@@ -311,7 +348,7 @@ func (h *handlers) UpdateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	setInt(body, "waiting_time", in.WaitingTime)
 
 	if len(in.AddKeywords) > 0 || len(in.RemoveKeywords) > 0 {
-		names, err := h.mergedKeywordNames(ctx, in.ID, in.AddKeywords, in.RemoveKeywords)
+		names, err := h.mergedKeywordNames(ctx, id, in.AddKeywords, in.RemoveKeywords)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -320,8 +357,31 @@ func (h *handlers) UpdateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if len(body) == 0 {
 		return nil, nil, fmt.Errorf("nothing to update: provide at least one field")
 	}
+	return h.patchRecipe(ctx, id, body, "updated")
+}
 
-	raw, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("recipe/%d/", in.ID), nil, body)
+// ---- set_recipe_steps ----
+
+type setRecipeStepsInput struct {
+	Recipe string      `json:"recipe" jsonschema:"recipe name or numeric id"`
+	Steps  []stepInput `json:"steps" jsonschema:"the full new ordered list of steps and ingredients, replacing the existing ones"`
+}
+
+// setRecipeSteps replaces a recipe's steps/ingredients (re-describe to edit).
+func (h *handlers) setRecipeSteps(ctx context.Context, _ *mcp.CallToolRequest, in setRecipeStepsInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps, err := h.buildSteps(ctx, in.Steps)
+	if err != nil {
+		return nil, nil, err
+	}
+	return h.patchRecipe(ctx, id, map[string]any{"steps": steps}, "updated")
+}
+
+func (h *handlers) patchRecipe(ctx context.Context, id int, body map[string]any, status string) (*mcp.CallToolResult, any, error) {
+	raw, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("recipe/%d/", id), nil, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -329,7 +389,7 @@ func (h *handlers) UpdateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, nil, fmt.Errorf("decoding updated recipe: %w", err)
 	}
-	return jsonResult(map[string]any{"status": "updated", "recipe": toCard(r)})
+	return jsonResult(map[string]any{"status": status, "recipe": toCard(r)})
 }
 
 // mergedKeywordNames reads the recipe's current keywords and applies adds/removes.
@@ -347,8 +407,7 @@ func (h *handlers) mergedKeywordNames(ctx context.Context, recipeID int, add, re
 		set[strings.ToLower(k.Name)] = k.Name
 	}
 	for _, n := range add {
-		n = strings.TrimSpace(n)
-		if n != "" {
+		if n = strings.TrimSpace(n); n != "" {
 			set[strings.ToLower(n)] = n
 		}
 	}
@@ -362,43 +421,100 @@ func (h *handlers) mergedKeywordNames(ctx context.Context, recipeID int, add, re
 	return names, nil
 }
 
+// ---- delete_recipe ----
+
+type deleteRecipeInput struct {
+	Recipe string `json:"recipe" jsonschema:"recipe name or numeric id"`
+}
+
+// deleteRecipe deletes a recipe.
+func (h *handlers) deleteRecipe(ctx context.Context, _ *mcp.CallToolRequest, in deleteRecipeInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("recipe/%d/", id), nil, nil); err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"status": "deleted", "id": id})
+}
+
 // ---- set_recipe_image ----
 
 type recipeImageInput struct {
-	ID        int    `json:"id" jsonschema:"recipe id"`
-	ImagePath string `json:"image_path,omitempty" jsonschema:"local filesystem path to an image file to upload"`
-	ImageURL  string `json:"image_url,omitempty" jsonschema:"remote image URL for Tandoor to fetch and store"`
+	Recipe    string `json:"recipe" jsonschema:"recipe name or numeric id"`
+	ImagePath string `json:"image_path,omitempty" jsonschema:"local image file path; only allowed within the server's configured image directory"`
+	ImageURL  string `json:"image_url,omitempty" jsonschema:"remote image URL (http/https) for Tandoor to fetch and store"`
 }
 
-// SetRecipeImage sets a recipe image from a local file or a remote URL.
-func (h *handlers) SetRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, in recipeImageInput) (*mcp.CallToolResult, any, error) {
-	path := fmt.Sprintf("recipe/%d/image/", in.ID)
+// setRecipeImage sets a recipe image from a (gated) local file or a remote URL.
+func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, in recipeImageInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	path := fmt.Sprintf("recipe/%d/image/", id)
 	switch {
 	case in.ImagePath != "":
-		f, err := os.Open(in.ImagePath)
+		full, err := h.safeImagePath(in.ImagePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		f, err := os.Open(full)
 		if err != nil {
 			return nil, nil, fmt.Errorf("opening image: %w", err)
 		}
 		defer f.Close()
-		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(in.ImagePath), f); err != nil {
+		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(full), io.LimitReader(f, maxImageBytes)); err != nil {
 			return nil, nil, err
 		}
-		return textResult(fmt.Sprintf("image set on recipe %d from %s", in.ID, filepath.Base(in.ImagePath)))
+		return jsonResult(map[string]any{"status": "image set", "id": id, "from": "file"})
 	case in.ImageURL != "":
+		if err := validateHTTPURL(in.ImageURL); err != nil {
+			return nil, nil, err
+		}
 		if _, err := h.c.Upload(ctx, http.MethodPut, path, map[string]string{"image_url": in.ImageURL}, "", "", nil); err != nil {
 			return nil, nil, err
 		}
-		return textResult(fmt.Sprintf("image set on recipe %d from URL", in.ID))
+		return jsonResult(map[string]any{"status": "image set", "id": id, "from": "url"})
 	default:
 		return nil, nil, fmt.Errorf("provide image_path or image_url")
 	}
 }
 
+// safeImagePath validates a local image path against the configured allow-dir.
+func (h *handlers) safeImagePath(p string) (string, error) {
+	if h.imageDir == "" {
+		return "", fmt.Errorf("local image upload is disabled; set TANDOOR_IMAGE_DIR to a directory to allow it, or use image_url")
+	}
+	root, err := filepath.EvalSymlinks(h.imageDir)
+	if err != nil {
+		return "", fmt.Errorf("configured image directory %q is not accessible: %w", h.imageDir, err)
+	}
+	full, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", fmt.Errorf("opening image: %w", err)
+	}
+	rel, err := filepath.Rel(root, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("image_path %q is outside the allowed image directory", p)
+	}
+	return full, nil
+}
+
 // ---- find_related_recipes ----
 
-// FindRelatedRecipes lists recipes related to the given recipe.
-func (h *handlers) FindRelatedRecipes(ctx context.Context, _ *mcp.CallToolRequest, in recipeIDInput) (*mcp.CallToolResult, any, error) {
-	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/related/", in.ID), nil, nil)
+type recipeRefInput struct {
+	Recipe string `json:"recipe" jsonschema:"recipe name or numeric id"`
+}
+
+// findRelatedRecipes lists recipes related to the given recipe.
+func (h *handlers) findRelatedRecipes(ctx context.Context, _ *mcp.CallToolRequest, in recipeRefInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/related/", id), nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -416,15 +532,19 @@ func (h *handlers) FindRelatedRecipes(ctx context.Context, _ *mcp.CallToolReques
 // ---- log_cooked ----
 
 type logCookedInput struct {
-	RecipeID int    `json:"recipe_id" jsonschema:"id of the recipe that was cooked"`
+	Recipe   string `json:"recipe" jsonschema:"recipe name or numeric id that was cooked"`
 	Rating   *int   `json:"rating,omitempty" jsonschema:"rating to record, 0-5"`
 	Servings *int   `json:"servings,omitempty" jsonschema:"servings made"`
-	Comment  string `json:"comment,omitempty"`
+	Comment  string `json:"comment,omitempty" jsonschema:"optional note"`
 }
 
-// LogCooked records a cook-log entry (which is also how a recipe gets rated).
-func (h *handlers) LogCooked(ctx context.Context, _ *mcp.CallToolRequest, in logCookedInput) (*mcp.CallToolResult, any, error) {
-	body := map[string]any{"recipe": in.RecipeID}
+// logCooked records a cook-log entry (which is also how a recipe gets rated).
+func (h *handlers) logCooked(ctx context.Context, _ *mcp.CallToolRequest, in logCookedInput) (*mcp.CallToolResult, any, error) {
+	id, err := h.resolveRecipe(ctx, in.Recipe)
+	if err != nil {
+		return nil, nil, err
+	}
+	body := map[string]any{"recipe": id}
 	setInt(body, "rating", in.Rating)
 	setInt(body, "servings", in.Servings)
 	if in.Comment != "" {
@@ -433,7 +553,11 @@ func (h *handlers) LogCooked(ctx context.Context, _ *mcp.CallToolRequest, in log
 	if _, err := h.c.Do(ctx, http.MethodPost, "cook-log/", nil, body); err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("logged a cook of recipe %d", in.RecipeID))
+	out := map[string]any{"status": "logged", "recipe_id": id}
+	if in.Rating != nil {
+		out["rating"] = *in.Rating
+	}
+	return jsonResult(out)
 }
 
 // ---- shared builders ----
@@ -462,23 +586,45 @@ func setInt(body map[string]any, key string, v *int) {
 	}
 }
 
-func appendMissing(warnings []string, kind string, missing []string) []string {
-	for _, m := range missing {
-		warnings = append(warnings, fmt.Sprintf("%s %q not found; it was ignored as a filter", kind, m))
+// validateHTTPURL rejects URLs that aren't http/https with a host, before any
+// agent-supplied URL is handed to Tandoor's server-side fetcher.
+func validateHTTPURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("a URL is required")
 	}
-	return warnings
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("URL must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("URL must include a host")
+	}
+	return nil
 }
 
-func namesJoin(ns []named) string {
-	parts := make([]string, 0, len(ns))
-	for _, n := range ns {
-		parts = append(parts, fmt.Sprintf("%s (id %d)", n.Name, n.ID))
+// importErrorMessage extracts Tandoor's friendly failure message from a 400.
+func importErrorMessage(err error) (string, bool) {
+	var apiErr *tandoor.APIError
+	if !errors.As(err, &apiErr) {
+		return "", false
 	}
-	return strings.Join(parts, ", ")
+	var body struct {
+		Msg string `json:"msg"`
+	}
+	if json.Unmarshal([]byte(apiErr.Body), &body) == nil && strings.TrimSpace(body.Msg) != "" {
+		return body.Msg, true
+	}
+	return "", false
 }
 
-// sourceRecipeToBody maps a scraped recipe into a recipe-create payload.
-func sourceRecipeToBody(sr sourceRecipe, sourceURL string) map[string]any {
+// sourceRecipeToBody maps a scraped recipe into a recipe-create payload, returning
+// warnings for any ingredients that could not be attributed to a food.
+func sourceRecipeToBody(sr sourceRecipe, sourceURL string) (map[string]any, []string) {
+	var warnings []string
 	steps := make([]map[string]any, 0, len(sr.Steps))
 	for si, st := range sr.Steps {
 		ings := make([]map[string]any, 0, len(st.Ingredients))
@@ -494,21 +640,22 @@ func sourceRecipeToBody(sr sourceRecipe, sourceURL string) map[string]any {
 				in.Food = ing.Food.Name
 			}
 			if in.Food == "" {
-				continue // skip ingredients the scraper could not attribute to a food
-			}
-			if payload, err := buildIngredient(in, nil); err == nil && payload != nil {
-				if ing.OriginalText != "" {
-					payload["original_text"] = ing.OriginalText
+				if t := strings.TrimSpace(ing.OriginalText); t != "" {
+					warnings = append(warnings, fmt.Sprintf("dropped ingredient with no food: %q", t))
 				}
-				ings = append(ings, payload)
+				continue
 			}
+			payload, err := buildIngredient(in, nil)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("dropped ingredient %q: %v", ing.OriginalText, err))
+				continue
+			}
+			if ing.OriginalText != "" {
+				payload["original_text"] = ing.OriginalText
+			}
+			ings = append(ings, payload)
 		}
-		steps = append(steps, map[string]any{
-			"instruction":            st.Instruction,
-			"ingredients":            ings,
-			"show_ingredients_table": true,
-			"order":                  si,
-		})
+		steps = append(steps, buildStep(st.Instruction, si, nil, ings))
 	}
 	names := make([]string, 0, len(sr.Keywords))
 	for _, k := range sr.Keywords {
@@ -531,7 +678,7 @@ func sourceRecipeToBody(sr sourceRecipe, sourceURL string) map[string]any {
 	setInt(body, "servings", sr.Servings)
 	setInt(body, "working_time", sr.WorkingTime)
 	setInt(body, "waiting_time", sr.WaitingTime)
-	return body
+	return body, warnings
 }
 
 // renderSourceRecipe renders a scraped (unsaved) recipe for preview.

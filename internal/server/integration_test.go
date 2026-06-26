@@ -27,7 +27,7 @@ func connect(t *testing.T, backend http.HandlerFunc) *mcp.ClientSession {
 		t.Fatalf("client: %v", err)
 	}
 	serverT, clientT := mcp.NewInMemoryTransports()
-	ss, err := New(c).Connect(ctx, serverT, nil)
+	ss, err := New(c, Options{}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -59,8 +59,8 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 	}
 	for _, want := range []string{
 		"tandoor_resources", "tandoor_list", "tandoor_action",
-		"find_recipes", "create_recipe", "import_recipe_from_url",
-		"plan_meal", "get_shopping_list", "set_food_on_hand", "keyword_merge",
+		"find_recipes", "create_recipe", "import_recipe_from_url", "delete_recipe",
+		"plan_meal", "get_shopping_list", "set_food_on_hand", "merge_taxonomy",
 	} {
 		if !names[want] {
 			t.Errorf("tool %q not registered (have %d tools)", want, len(tools.Tools))

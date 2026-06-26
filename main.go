@@ -1,11 +1,14 @@
 // Command tandoor-mcp is a Model Context Protocol server for the Tandoor
 // Recipes REST API. It speaks MCP over stdio and is configured entirely through
-// environment variables (see ConfigFromEnv).
+// environment variables (see tandoor.ConfigFromEnv and TANDOOR_IMAGE_DIR).
 package main
 
 import (
 	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -25,7 +28,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := server.New(client).Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	opts := server.Options{ImageDir: os.Getenv("TANDOOR_IMAGE_DIR")}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := server.New(client, opts).Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }

@@ -90,18 +90,24 @@ func (h *handlers) buildSteps(ctx context.Context, steps []stepInput) ([]map[str
 				ings = append(ings, payload)
 			}
 		}
-		step := map[string]any{
-			"instruction":            st.Instruction,
-			"ingredients":            ings,
-			"show_ingredients_table": true,
-			"order":                  si,
-		}
-		if st.Time != nil {
-			step["time"] = *st.Time
-		}
-		out = append(out, step)
+		out = append(out, buildStep(st.Instruction, si, st.Time, ings))
 	}
 	return out, nil
+}
+
+// buildStep assembles one step payload. Shared by recipe creation and import so
+// the nested shape lives in exactly one place.
+func buildStep(instruction string, order int, minutes *int, ingredients []map[string]any) map[string]any {
+	step := map[string]any{
+		"instruction":            instruction,
+		"ingredients":            ingredients,
+		"show_ingredients_table": true,
+		"order":                  order,
+	}
+	if minutes != nil {
+		step["time"] = *minutes
+	}
+	return step
 }
 
 // buildIngredient produces one nested ingredient payload. parsed is non-nil when
@@ -118,7 +124,11 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		if parsed.Amount.Set {
 			m["amount"] = parsed.Amount.Value
 		} else {
+			// Absent or non-numeric amount: never claim a quantity of 0.
 			m["amount"] = 0
+			if parsed.Amount.Raw != "" {
+				m["no_amount"] = true
+			}
 		}
 		if parsed.Unit != nil && parsed.Unit.Name != "" {
 			m["unit"] = map[string]any{"name": parsed.Unit.Name}

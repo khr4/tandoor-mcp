@@ -23,8 +23,9 @@ Configured entirely via environment variables:
 |---|---|---|
 | `TANDOOR_URL` | yes | Instance root, e.g. `https://recipes.example.com` (no `/api` suffix). |
 | `TANDOOR_TOKEN` | yes | API token — Tandoor: *Settings → API → generate*. (`TANDOOR_API_TOKEN` also accepted.) |
-| `TANDOOR_INSECURE_SKIP_VERIFY` | no | `true` to skip TLS verification (self-signed instances). |
+| `TANDOOR_INSECURE_SKIP_VERIFY` | no | `true` to skip TLS verification (self-signed instances). Logs a warning. |
 | `TANDOOR_TIMEOUT` | no | Per-request timeout in seconds (default `30`). |
+| `TANDOOR_IMAGE_DIR` | no | Directory `set_recipe_image` may read local files from. Unset disables local-file uploads (use `image_url`). |
 
 The token is sent as `Authorization: Bearer <token>`.
 
@@ -55,31 +56,33 @@ Register it with an MCP client. Example (`claude_desktop_config.json` /
 
 ### Designed tools (use these)
 
-Recipes:
+Recipes — every recipe argument accepts a **name or id**:
 
 | Tool | Purpose |
 |---|---|
-| `find_recipes` | Search by words, keyword/ingredient **names**, book, rating, or makeable-now. Returns compact cards. |
-| `get_recipe` | One recipe as readable Markdown (metadata, ingredient lines, numbered steps). |
-| `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`. Foods/units/keywords created by name. |
+| `find_recipes` | Search by words, keyword/ingredient **names** (match ALL), book, rating, or makeable-now. Returns compact cards. |
+| `get_recipe` | One recipe as structured fields + a Markdown view; optional `servings` re-scales amounts. |
+| `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`; top-level `ingredients` for simple recipes or `steps[]` for multi-step. Foods/units/keywords created by name. |
 | `import_recipe_from_url` | Scrape a web page and save it (`save=false` for a preview). |
 | `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. |
-| `set_recipe_image` | Set an image from a local file or remote URL. |
+| `set_recipe_steps` | Replace a recipe's steps/ingredients (re-describe to edit). |
+| `delete_recipe` | Delete a recipe. |
+| `set_recipe_image` | Set an image from a remote URL, or a local file within `TANDOOR_IMAGE_DIR`. |
 | `find_related_recipes` | Recipes sharing keywords/foods. |
 | `log_cooked` | Record a cook + rating (how recipes get rated). |
 
-Meal planning, shopping, pantry:
+Meal planning, shopping, pantry, taxonomy:
 
 | Tool | Purpose |
 |---|---|
-| `plan_meal` / `get_meal_plan` | Add to / read the meal-plan calendar (meal type by name). |
+| `plan_meal` / `get_meal_plan` / `remove_meal_plan_entry` | Manage the meal-plan calendar (meal type by name, recipe by name/id). |
 | `get_shopping_list` | Current entries as readable lines. |
 | `add_to_shopping_list` | Add an ad-hoc food with amount + unit. |
 | `add_recipe_to_shopping` | Add a recipe's ingredients (optionally scaled). |
 | `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. |
 | `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand. |
-| `list_keywords` / `list_foods` / `list_units` | Discover names + ids. |
-| `keyword_merge`/`move`, `food_merge`/`move`, `unit_merge` | Tidy the taxonomy. |
+| `list_taxonomy` | List keywords, foods or units (`kind`) with ids. |
+| `merge_taxonomy` / `move_taxonomy` | Merge or re-parent a keyword/food/unit (by name or id). |
 
 Ingredient quantities are always kept explicit: amounts and units are split out
 (via Tandoor's parser for natural lines) rather than flattened into free text.
