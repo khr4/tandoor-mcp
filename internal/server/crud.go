@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -14,6 +13,23 @@ import (
 )
 
 const maxGenericPageSize = 200
+
+var genericMutationResources = map[string]bool{
+	"keyword":                       true,
+	"food":                          true,
+	"unit":                          true,
+	"unit-conversion":               true,
+	"property":                      true,
+	"property-type":                 true,
+	"meal-type":                     true,
+	"recipe-book":                   true,
+	"shopping-list":                 true,
+	"supermarket":                   true,
+	"supermarket-category":          true,
+	"supermarket-category-relation": true,
+	"inventory-location":            true,
+	"custom-filter":                 true,
+}
 
 // resolve validates a resource name against the catalog and restricted denylist.
 func resolve(name string) (Resource, error) {
@@ -24,6 +40,17 @@ func resolve(name string) (Resource, error) {
 	r, ok := lookupResource(name)
 	if !ok {
 		return Resource{}, fmt.Errorf("unknown resource %q; call tandoor_resources for the catalog", name)
+	}
+	return r, nil
+}
+
+func resolveMutation(name string) (Resource, error) {
+	r, err := resolve(name)
+	if err != nil {
+		return Resource{}, err
+	}
+	if !genericMutationResources[r.Name] {
+		return Resource{}, fmt.Errorf("resource %q is read-only through generic mutation tools; use a designed tool or an audited mutation resource", r.Name)
 	}
 	return r, nil
 }
@@ -56,7 +83,11 @@ func (h *handlers) genericList(ctx context.Context, _ *mcp.CallToolRequest, in l
 	}
 	q := url.Values{}
 	if in.Query != "" {
-		q.Set("query", in.Query)
+		query, err := validateBoundedString("query", in.Query, maxGenericQueryValueRunes, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		q.Set("query", query)
 	}
 	if in.Page != nil {
 		if *in.Page <= 0 {
@@ -71,10 +102,20 @@ func (h *handlers) genericList(ctx context.Context, _ *mcp.CallToolRequest, in l
 		q.Set("page_size", strconv.Itoa(*in.PageSize))
 	}
 	if in.Ordering != "" {
+		if err := validateOrdering(in.Ordering); err != nil {
+			return nil, nil, err
+		}
 		q.Set("ordering", in.Ordering)
 	}
 	for k, v := range in.Filters {
-		q.Set(k, v)
+		key, err := validateGenericQueryKey("filter key", k)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := validateGenericQueryValue("filter value", v); err != nil {
+			return nil, nil, err
+		}
+		q.Set(key, v)
 	}
 	raw, err := h.c.Do(ctx, http.MethodGet, r.Path+"/", q, nil)
 	if err != nil {
@@ -94,7 +135,11 @@ func (h *handlers) genericGet(ctx context.Context, _ *mcp.CallToolRequest, in ge
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := h.c.Do(ctx, http.MethodGet, objectPath(r, in.ID), nil, nil)
+	object, err := objectPath(r, in.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := h.c.Do(ctx, http.MethodGet, object, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -108,12 +153,15 @@ type createInput struct {
 
 // genericCreate creates an object.
 func (h *handlers) genericCreate(ctx context.Context, _ *mcp.CallToolRequest, in createInput) (*mcp.CallToolResult, any, error) {
-	r, err := resolve(in.Resource)
+	r, err := resolveMutation(in.Resource)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(in.Data) == 0 {
 		return nil, nil, fmt.Errorf("data is required to create a %s", r.Name)
+	}
+	if err := validateGenericBody(in.Data); err != nil {
+		return nil, nil, err
 	}
 	raw, err := h.c.Do(ctx, http.MethodPost, r.Path+"/", nil, in.Data)
 	if err != nil {
@@ -131,18 +179,25 @@ type updateInput struct {
 
 // genericUpdate updates an object (PATCH by default, PUT when Full).
 func (h *handlers) genericUpdate(ctx context.Context, _ *mcp.CallToolRequest, in updateInput) (*mcp.CallToolResult, any, error) {
-	r, err := resolve(in.Resource)
+	r, err := resolveMutation(in.Resource)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(in.Data) == 0 {
 		return nil, nil, fmt.Errorf("data is required to update a %s", r.Name)
 	}
+	if err := validateGenericBody(in.Data); err != nil {
+		return nil, nil, err
+	}
+	object, err := objectPath(r, in.ID)
+	if err != nil {
+		return nil, nil, err
+	}
 	method := http.MethodPatch
 	if in.Full {
 		method = http.MethodPut
 	}
-	raw, err := h.c.Do(ctx, method, objectPath(r, in.ID), nil, in.Data)
+	raw, err := h.c.Do(ctx, method, object, nil, in.Data)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,11 +211,15 @@ type deleteInput struct {
 
 // genericDelete removes an object.
 func (h *handlers) genericDelete(ctx context.Context, _ *mcp.CallToolRequest, in deleteInput) (*mcp.CallToolResult, any, error) {
-	r, err := resolve(in.Resource)
+	r, err := resolveMutation(in.Resource)
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := h.c.Do(ctx, http.MethodDelete, objectPath(r, in.ID), nil, nil); err != nil {
+	object, err := objectPath(r, in.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := h.c.Do(ctx, http.MethodDelete, object, nil, nil); err != nil {
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"status": "deleted", "resource": r.Name, "id": in.ID})
@@ -188,20 +247,33 @@ func (h *handlers) genericAction(ctx context.Context, _ *mcp.CallToolRequest, in
 	default:
 		return nil, nil, fmt.Errorf("unsupported method %q", in.Method)
 	}
-	cleanPath, err := validateActionPath(in.Path)
+	cleanPath, err := validateActionPath(method, in.Path)
 	if err != nil {
 		return nil, nil, err
 	}
 	q := url.Values{}
 	for k, v := range in.Query {
-		q.Set(k, v)
+		key, err := validateGenericQueryKey("query key", k)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := validateGenericQueryValue("query value", v); err != nil {
+			return nil, nil, err
+		}
+		q.Set(key, v)
 	}
 	for _, p := range in.QueryParams {
-		name := strings.TrimSpace(p.Name)
-		if name == "" {
-			return nil, nil, fmt.Errorf("query parameter name is required")
+		name, err := validateGenericQueryKey("query parameter name", p.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := validateGenericQueryValue("query parameter value", p.Value); err != nil {
+			return nil, nil, err
 		}
 		q.Add(name, p.Value)
+	}
+	if err := validateGenericBody(in.Body); err != nil {
+		return nil, nil, err
 	}
 	var body any
 	if len(in.Body) > 0 {
@@ -216,9 +288,9 @@ func (h *handlers) genericAction(ctx context.Context, _ *mcp.CallToolRequest, in
 	return rawResult(raw)
 }
 
-// validateActionPath rejects empty paths, parent-directory traversal, and
-// restricted resources reached by their first segment.
-func validateActionPath(p string) (string, error) {
+// validateActionPath rejects empty paths, traversal, and every custom endpoint
+// except the small audited allowlist below.
+func validateActionPath(method, p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", fmt.Errorf("path is required")
@@ -233,22 +305,55 @@ func validateActionPath(p string) (string, error) {
 	} else {
 		clean = strings.TrimPrefix(clean, "api/")
 	}
-	segs := strings.Split(clean, "/")
-	if slices.Contains(segs, "") || slices.Contains(segs, ".") || slices.Contains(segs, "..") {
-		return "", fmt.Errorf("path may not contain empty, '.' or '..' segments")
+	for _, seg := range strings.Split(clean, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("path may not contain empty, '.' or '..' segments")
+		}
 	}
 	canonical := strings.TrimPrefix(path.Clean("/"+clean), "/")
 	if canonical == "." || canonical == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	segs = strings.Split(canonical, "/")
-	if len(segs) > 0 && restrictedResources[segs[0]] {
-		return "", fmt.Errorf("endpoint %q is restricted", segs[0])
+	segs := strings.Split(canonical, "/")
+	for _, seg := range segs {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("path may not contain empty, '.' or '..' segments")
+		}
+		if _, err := validateBoundedString("path segment", seg, maxGenericQueryKeyRunes, false); err != nil {
+			return "", err
+		}
+	}
+	if !allowedActionPath(method, segs) {
+		return "", fmt.Errorf("endpoint %q is not in the tandoor_action allowlist", canonical)
 	}
 	return canonical + "/", nil
 }
 
+func allowedActionPath(method string, segs []string) bool {
+	if method == http.MethodGet && len(segs) == 3 && segs[0] == "recipe" && segs[2] == "related" {
+		_, err := validatePositiveIDString("recipe id", segs[1])
+		return err == nil
+	}
+	if method == http.MethodGet && len(segs) == 2 && segs[0] == "recipe" && segs[1] == "flat" {
+		return true
+	}
+	if method == http.MethodPost && len(segs) == 2 && segs[0] == "ingredient-parser" && segs[1] == "post" {
+		return true
+	}
+	if method == http.MethodGet && len(segs) == 1 && segs[0] == "fdc-search" {
+		return true
+	}
+	if method == http.MethodGet && len(segs) == 2 && segs[0] == "server-settings" && segs[1] == "current" {
+		return true
+	}
+	return false
+}
+
 // objectPath builds the detail route for an object, e.g. "recipe/5/".
-func objectPath(r Resource, id string) string {
-	return r.Path + "/" + url.PathEscape(strings.TrimSpace(id)) + "/"
+func objectPath(r Resource, id string) (string, error) {
+	cleanID, err := validatePositiveIDString("id", id)
+	if err != nil {
+		return "", err
+	}
+	return r.Path + "/" + url.PathEscape(cleanID) + "/", nil
 }

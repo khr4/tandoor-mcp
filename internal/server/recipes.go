@@ -200,8 +200,24 @@ type createRecipeOutput struct {
 // createRecipe creates a recipe, splitting quantities out of natural-language
 // ingredient lines and get-or-creating foods, units and keywords by name.
 func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in createRecipeInput) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(in.Name) == "" {
-		return nil, nil, fmt.Errorf("name is required")
+	name, err := cleanName("name", in.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	description, err := cleanOptionalFreeText("description", in.Description)
+	if err != nil {
+		return nil, nil, err
+	}
+	sourceURL := ""
+	if strings.TrimSpace(in.SourceURL) != "" {
+		sourceURL, err = validatePublicHTTPURL(in.SourceURL)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	keywords, err := validatedKeywordObjects(in.Keywords)
+	if err != nil {
+		return nil, nil, err
 	}
 	// Refuse the ambiguous "both" case rather than silently dropping the
 	// top-level ingredients/instructions in favor of steps[].
@@ -217,16 +233,16 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"name":     in.Name,
+		"name":     name,
 		"internal": true,
-		"keywords": keywordObjects(in.Keywords),
+		"keywords": keywords,
 		"steps":    steps,
 	}
-	if in.Description != "" {
-		body["description"] = in.Description
+	if description != "" {
+		body["description"] = description
 	}
-	if in.SourceURL != "" {
-		body["source_url"] = in.SourceURL
+	if sourceURL != "" {
+		body["source_url"] = sourceURL
 	}
 	setInt(body, "servings", in.Servings)
 	setInt(body, "working_time", in.WorkingTime)
@@ -236,8 +252,8 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		var unknown *tandoor.OutcomeUnknownError
 		if errors.As(err, &unknown) {
-			extra := map[string]any{"operation": "create_recipe", "name": in.Name}
-			if ids, lookupErr := h.recipeCandidateIDsByName(ctx, in.Name); lookupErr == nil && len(ids) > 0 {
+			extra := map[string]any{"operation": "create_recipe", "name": name}
+			if ids, lookupErr := h.recipeCandidateIDsByName(ctx, name); lookupErr == nil && len(ids) > 0 {
 				extra["candidate_recipe_ids"] = ids
 			} else if lookupErr != nil {
 				extra["candidate_lookup_error"] = lookupErr.Error()
@@ -311,14 +327,15 @@ type importRecipeOutput struct {
 
 // importRecipeFromURL scrapes a recipe and (by default) saves it.
 func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolRequest, in importRecipeInput) (*mcp.CallToolResult, any, error) {
-	if err := validateHTTPURL(in.URL); err != nil {
+	source, err := validatePublicHTTPURL(in.URL)
+	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := h.c.Do(ctx, http.MethodPost, "recipe-from-source/", nil, map[string]any{"url": in.URL})
+	raw, err := h.c.Do(ctx, http.MethodPost, "recipe-from-source/", nil, map[string]any{"url": source})
 	if err != nil {
 		var unknown *tandoor.OutcomeUnknownError
 		if errors.As(err, &unknown) {
-			return outcomeUnknownResult(unknown, map[string]any{"operation": "import_recipe_from_url", "source": in.URL})
+			return outcomeUnknownResult(unknown, map[string]any{"operation": "import_recipe_from_url", "source": source})
 		}
 		if msg, ok := importErrorMessage(err); ok {
 			return nil, nil, fmt.Errorf("could not import: %s", msg)
@@ -341,7 +358,7 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 		if !save {
 			return nil, nil, fmt.Errorf("preview is not available for this source: Tandoor already imported recipe id %d server-side", *resp.RecipeID)
 		}
-		return jsonResult(importRecipeOutput{ID: *resp.RecipeID, Status: "imported", Source: in.URL, Duplicates: resp.Duplicates})
+		return jsonResult(importRecipeOutput{ID: *resp.RecipeID, Status: "imported", Source: source, Duplicates: resp.Duplicates})
 	}
 	if resp.Error || len(resp.Recipe) == 0 || string(resp.Recipe) == "null" {
 		msg := resp.Msg
@@ -357,12 +374,12 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 
 	if !save {
 		return jsonResult(importRecipeOutput{
-			Status: "preview", Name: sr.Name, Source: in.URL, ImageURL: sr.ImageURL,
+			Status: "preview", Name: sr.Name, Source: source, ImageURL: sr.ImageURL,
 			Duplicates: resp.Duplicates, Markdown: renderSourceRecipe(sr),
 		})
 	}
 
-	body, warnings := sourceRecipeToBody(sr, in.URL)
+	body, warnings := sourceRecipeToBody(sr, source)
 	if len(warnings) > 0 && (in.AllowPartial == nil || !*in.AllowPartial) {
 		return nil, nil, fmt.Errorf("refusing to save parsed recipe because %d ingredient(s) would be dropped; call with save=false to preview or allow_partial=true to save anyway: %s", len(warnings), strings.Join(warnings, "; "))
 	}
@@ -370,7 +387,7 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		var unknown *tandoor.OutcomeUnknownError
 		if errors.As(err, &unknown) {
-			extra := map[string]any{"operation": "import_recipe_from_url_create", "source": in.URL, "name": sr.Name}
+			extra := map[string]any{"operation": "import_recipe_from_url_create", "source": source, "name": sr.Name}
 			if ids, lookupErr := h.recipeCandidateIDsByName(ctx, sr.Name); lookupErr == nil && len(ids) > 0 {
 				extra["candidate_recipe_ids"] = ids
 			} else if lookupErr != nil {
@@ -391,7 +408,7 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 		partial = true
 	}
 	return jsonResult(importRecipeOutput{
-		ID: rec.ID, Name: rec.Name, Status: status, Source: in.URL,
+		ID: rec.ID, Name: rec.Name, Status: status, Source: source,
 		ImageURL: sr.ImageURL, Duplicates: resp.Duplicates, Warnings: warnings,
 		DroppedIngredients: warnings, Partial: partial,
 	})
@@ -420,13 +437,28 @@ func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	body := map[string]any{}
 	if in.Name != nil {
-		body["name"] = *in.Name
+		name, err := cleanName("name", *in.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["name"] = name
 	}
 	if in.Description != nil {
-		body["description"] = *in.Description
+		description, err := cleanOptionalFreeText("description", *in.Description)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["description"] = description
 	}
 	if in.SourceURL != nil {
-		body["source_url"] = *in.SourceURL
+		sourceURL := strings.TrimSpace(*in.SourceURL)
+		if sourceURL != "" {
+			sourceURL, err = validatePublicHTTPURL(sourceURL)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		body["source_url"] = sourceURL
 	}
 	setInt(body, "servings", in.Servings)
 	setInt(body, "working_time", in.WorkingTime)
@@ -444,7 +476,11 @@ func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 			return nil, nil, fmt.Errorf("recipe changed since get_recipe; refresh it and retry with the new edit_revision")
 		}
 		names := mergedKeywordNamesFromRecipe(r, in.AddKeywords, in.RemoveKeywords)
-		body["keywords"] = keywordObjects(names)
+		keywords, err := validatedKeywordObjects(names)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["keywords"] = keywords
 	} else if strings.TrimSpace(in.ExpectedRevision) != "" {
 		if err := h.checkRecipeRevision(ctx, id, in.ExpectedRevision); err != nil {
 			return nil, nil, err
@@ -638,11 +674,12 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 		}
 		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "file"})
 	case hasURL:
-		if err := validateHTTPURL(in.ImageURL); err != nil {
+		imageURL, err := validatePublicHTTPURL(in.ImageURL)
+		if err != nil {
 			return nil, nil, err
 		}
-		if _, err := h.c.Upload(ctx, http.MethodPut, path, map[string]string{"image_url": in.ImageURL}, "", "", nil); err != nil {
-			return imageURLUploadErrorResult(err, in.ImageURL)
+		if _, err := h.c.Upload(ctx, http.MethodPut, path, map[string]string{"image_url": imageURL}, "", "", nil); err != nil {
+			return imageURLUploadErrorResult(err, imageURL)
 		}
 		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "url"})
 	case hasInline:
@@ -992,10 +1029,20 @@ func (h *handlers) logCooked(ctx context.Context, _ *mcp.CallToolRequest, in log
 		return nil, nil, err
 	}
 	body := map[string]any{"recipe": id}
+	if in.Rating != nil && (*in.Rating < 0 || *in.Rating > 5) {
+		return nil, nil, fmt.Errorf("rating must be between 0 and 5")
+	}
+	if in.Servings != nil && *in.Servings <= 0 {
+		return nil, nil, fmt.Errorf("servings must be positive")
+	}
 	setInt(body, "rating", in.Rating)
 	setInt(body, "servings", in.Servings)
 	if in.Comment != "" {
-		body["comment"] = in.Comment
+		comment, err := cleanOptionalFreeText("comment", in.Comment)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["comment"] = comment
 	}
 	if _, err := h.c.Do(ctx, http.MethodPost, "cook-log/", nil, body); err != nil {
 		return nil, nil, err
@@ -1019,6 +1066,20 @@ func keywordObjects(names []string) []map[string]any {
 	return out
 }
 
+func validatedKeywordObjects(names []string) ([]map[string]any, error) {
+	out := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		name, err := cleanOptionalName("keyword", n)
+		if err != nil {
+			return nil, err
+		}
+		if name != "" {
+			out = append(out, map[string]any{"name": name})
+		}
+	}
+	return out, nil
+}
+
 func keywordNames(ks []apiKeyword) []string {
 	out := make([]string, 0, len(ks))
 	for _, k := range ks {
@@ -1031,33 +1092,6 @@ func setInt(body map[string]any, key string, v *int) {
 	if v != nil {
 		body[key] = *v
 	}
-}
-
-// validateHTTPURL rejects URLs that aren't public http/https targets before any
-// agent-supplied URL is handed to Tandoor's server-side fetcher.
-func validateHTTPURL(raw string) error {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return fmt.Errorf("a URL is required")
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("URL must be http or https, got %q", u.Scheme)
-	}
-	host := strings.Trim(strings.ToLower(u.Hostname()), ".")
-	if host == "" {
-		return fmt.Errorf("URL must include a host")
-	}
-	if u.User != nil {
-		return fmt.Errorf("URL must not include credentials")
-	}
-	if isUnsafeFetchHost(host) {
-		return fmt.Errorf("URL host %q is not allowed for server-side fetching", host)
-	}
-	return nil
 }
 
 func isUnsafeFetchHost(host string) bool {

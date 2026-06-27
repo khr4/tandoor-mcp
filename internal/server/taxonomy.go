@@ -27,11 +27,14 @@ func validKind(kind string, allowed ...string) (string, error) {
 // resolveTaxonomyID resolves a name-or-id reference for a taxonomy resource
 // without creating anything.
 func (h *handlers) resolveTaxonomyID(ctx context.Context, kind, ref string) (int, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return 0, fmt.Errorf("a %s (name or id) is required", kind)
+	ref, err := cleanRef(kind+" reference", ref)
+	if err != nil {
+		return 0, err
 	}
 	if id, err := strconv.Atoi(ref); err == nil {
+		if err := validatePositiveID(kind+" id", id); err != nil {
+			return 0, err
+		}
 		return id, nil
 	}
 	id, found, err := h.resolveUniqueExistingID(ctx, kind, kind, ref)
@@ -59,7 +62,11 @@ func (h *handlers) listTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return nil, nil, err
 	}
 	q := url.Values{}
-	addStr(q, "query", in.Query)
+	query, err := cleanOptionalName("query", in.Query)
+	if err != nil {
+		return nil, nil, err
+	}
+	addStr(q, "query", query)
 	limit := 50
 	if in.Limit != nil {
 		if *in.Limit <= 0 || *in.Limit > maxListTaxonomyLimit {

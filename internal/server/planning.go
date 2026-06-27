@@ -62,25 +62,34 @@ type planMealInput struct {
 
 // planMeal adds an entry to the meal-plan calendar.
 func (h *handlers) planMeal(ctx context.Context, _ *mcp.CallToolRequest, in planMealInput) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(in.Date) == "" {
+	date, err := cleanRef("date", in.Date)
+	if err != nil {
 		return nil, nil, fmt.Errorf("date is required (YYYY-MM-DD)")
 	}
-	if strings.TrimSpace(in.MealType) == "" {
-		return nil, nil, fmt.Errorf("meal_type is required")
+	mealType, err := cleanName("meal_type", in.MealType)
+	if err != nil {
+		return nil, nil, err
 	}
-	from := toDateTime(in.Date)
+	from := toDateTime(date)
 	to := from
 	if in.EndDate != "" {
-		to = toDateTime(in.EndDate)
+		endDate, err := cleanRef("end_date", in.EndDate)
+		if err != nil {
+			return nil, nil, err
+		}
+		to = toDateTime(endDate)
 	}
 	servings := 1
 	if in.Servings != nil {
+		if *in.Servings <= 0 {
+			return nil, nil, fmt.Errorf("servings must be positive")
+		}
 		servings = *in.Servings
 	}
 	body := map[string]any{
 		"from_date": from,
 		"to_date":   to,
-		"meal_type": map[string]any{"name": strings.TrimSpace(in.MealType)},
+		"meal_type": map[string]any{"name": mealType},
 		"servings":  servings,
 	}
 	if in.Recipe != "" {
@@ -91,10 +100,18 @@ func (h *handlers) planMeal(ctx context.Context, _ *mcp.CallToolRequest, in plan
 		body["recipe"] = id // bare int: Tandoor links the existing recipe
 	}
 	if in.Title != "" {
-		body["title"] = in.Title
+		title, err := cleanOptionalShortText("title", in.Title)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["title"] = title
 	}
 	if in.Note != "" {
-		body["note"] = in.Note
+		note, err := cleanOptionalFreeText("note", in.Note)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["note"] = note
 	}
 
 	raw, err := h.c.Do(ctx, http.MethodPost, "meal-plan/", nil, body)
@@ -120,10 +137,18 @@ func (h *handlers) getMealPlan(ctx context.Context, _ *mcp.CallToolRequest, in g
 	q := url.Values{}
 	// The list view filters on a __date lookup, so it wants plain dates.
 	if in.From != "" {
-		q.Set("from_date", dateOnly(in.From))
+		from, err := cleanRef("from", in.From)
+		if err != nil {
+			return nil, nil, err
+		}
+		q.Set("from_date", dateOnly(from))
 	}
 	if in.To != "" {
-		q.Set("to_date", dateOnly(in.To))
+		to, err := cleanRef("to", in.To)
+		if err != nil {
+			return nil, nil, err
+		}
+		q.Set("to_date", dateOnly(to))
 	}
 	raw, err := h.c.Do(ctx, http.MethodGet, "meal-plan/", q, nil)
 	if err != nil {
@@ -148,6 +173,9 @@ type removeMealPlanInput struct {
 
 // removeMealPlanEntry deletes a meal-plan entry.
 func (h *handlers) removeMealPlanEntry(ctx context.Context, _ *mcp.CallToolRequest, in removeMealPlanInput) (*mcp.CallToolResult, any, error) {
+	if err := validatePositiveID("meal plan entry id", in.ID); err != nil {
+		return nil, nil, err
+	}
 	if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("meal-plan/%d/", in.ID), nil, nil); err != nil {
 		return nil, nil, err
 	}

@@ -192,24 +192,28 @@ handle external image URLs.
 
 ### Generic API tools (escape hatch)
 
-Underneath, these reach the non-restricted resources listed by
-`tandoor_resources` and custom endpoints that pass path validation, for cases the
-designed tools don't cover:
+Underneath, these reach non-restricted resources listed by `tandoor_resources`
+and a small audited set of custom endpoints, for cases the designed tools don't
+cover:
 
 `tandoor_resources`, `tandoor_list`, `tandoor_get`, `tandoor_create`,
 `tandoor_update`, `tandoor_delete`, `tandoor_action`.
 
 Secret/admin/raw-log resources such as access tokens, storage connectors, users,
 spaces, uploaded user files and logs are intentionally hidden from the generic
-tools because their responses are returned to the model. Custom action paths are
-canonicalized and cannot use empty, `.` or `..` segments.
+tools because their responses are returned to the model. Generic create/update/
+delete is allowed only for audited low-risk metadata resources; recipes, steps,
+shopping entries, inventory entries, imports, logs, admin/user/file/AI/storage/
+sync surfaces require designed tools or are blocked. `tandoor_action` allows only
+`recipe/<id>/related/`, `recipe/flat/`, `ingredient-parser/post/`,
+`fdc-search/`, and `server-settings/current/`.
 
 Some capabilities are intentionally not exposed as designed tools until their
 safe contract is verified. Use the generic tools only when the designed surface
 does not cover a workflow and the target resource is visible in
-`tandoor_resources`. Generic API JSON responses are returned under `data`; empty
-and non-JSON upstream responses use explicit `empty_response` or
-`non_json_response` status objects.
+`tandoor_resources`. Generic API JSON responses are returned under `data`; empty,
+oversized and non-JSON upstream responses use explicit `empty_response`,
+`result_too_large` or `non_json_response` status objects.
 
 ## Development
 

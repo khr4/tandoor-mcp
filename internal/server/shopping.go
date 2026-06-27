@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -136,11 +135,12 @@ type addShoppingInput struct {
 
 // addToShoppingList adds an ad-hoc food to the shopping list.
 func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in addShoppingInput) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(in.Food) == "" {
-		return nil, nil, fmt.Errorf("food is required")
+	food, err := cleanName("food", in.Food)
+	if err != nil {
+		return nil, nil, err
 	}
 	body := map[string]any{
-		"food":    map[string]any{"name": strings.TrimSpace(in.Food)},
+		"food":    map[string]any{"name": food},
 		"checked": false,
 	}
 	// No amount given means a quantity-less item (e.g. "olive oil"), not "1 olive
@@ -151,7 +151,9 @@ func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 		body["amount"] = 0
 		body["no_amount"] = true
 	}
-	if u := strings.TrimSpace(in.Unit); u != "" {
+	if u, err := cleanOptionalName("unit", in.Unit); err != nil {
+		return nil, nil, err
+	} else if u != "" {
 		body["unit"] = map[string]any{"name": u}
 	}
 	raw, err := h.c.Do(ctx, http.MethodPost, "shopping-list-entry/", nil, body)
@@ -162,7 +164,7 @@ func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return nil, nil, fmt.Errorf("decoding created shopping entry: %w", err)
 	}
-	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": in.Food})
+	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": food})
 }
 
 // ---- add_recipe_to_shopping ----
@@ -179,6 +181,9 @@ func (h *handlers) addRecipeToShopping(ctx context.Context, _ *mcp.CallToolReque
 		return nil, nil, err
 	}
 	body := map[string]any{}
+	if in.Servings != nil && *in.Servings <= 0 {
+		return nil, nil, fmt.Errorf("servings must be positive")
+	}
 	setInt(body, "servings", in.Servings)
 	if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("recipe/%d/shopping/", id), nil, body); err != nil {
 		return nil, nil, err
@@ -196,6 +201,9 @@ type updateShoppingInput struct {
 
 // updateShoppingItem checks off or edits a single shopping list entry.
 func (h *handlers) updateShoppingItem(ctx context.Context, _ *mcp.CallToolRequest, in updateShoppingInput) (*mcp.CallToolResult, any, error) {
+	if err := validatePositiveID("shopping list entry id", in.ID); err != nil {
+		return nil, nil, err
+	}
 	body := map[string]any{}
 	if in.Checked != nil {
 		body["checked"] = *in.Checked
@@ -274,6 +282,11 @@ type checkShoppingInput struct {
 func (h *handlers) checkShoppingItems(ctx context.Context, _ *mcp.CallToolRequest, in checkShoppingInput) (*mcp.CallToolResult, any, error) {
 	if len(in.IDs) == 0 {
 		return nil, nil, fmt.Errorf("ids is required")
+	}
+	for _, id := range in.IDs {
+		if err := validatePositiveID("shopping list entry id", id); err != nil {
+			return nil, nil, err
+		}
 	}
 	checked := in.Checked == nil || *in.Checked
 	body := map[string]any{"ids": in.IDs, "checked": checked}

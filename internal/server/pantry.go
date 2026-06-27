@@ -92,12 +92,15 @@ func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 	names := make([]string, 0, len(all))
 	seen := map[string]bool{}
 	for _, f := range all {
-		f = strings.TrimSpace(f)
-		if f == "" || seen[strings.ToLower(f)] {
+		name, err := cleanOptionalName("food", f)
+		if err != nil {
+			return nil, nil, err
+		}
+		if name == "" || seen[strings.ToLower(name)] {
 			continue
 		}
-		seen[strings.ToLower(f)] = true
-		names = append(names, f)
+		seen[strings.ToLower(name)] = true
+		names = append(names, name)
 	}
 	if len(names) == 0 {
 		return nil, nil, fmt.Errorf("food (or foods) is required")

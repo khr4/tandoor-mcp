@@ -49,11 +49,14 @@ type addRecipeToBookInput struct {
 }
 
 func (h *handlers) resolveRecipeBookID(ctx context.Context, ref string) (int, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return 0, fmt.Errorf("a recipe book (name or id) is required")
+	ref, err := cleanRef("recipe book reference", ref)
+	if err != nil {
+		return 0, err
 	}
 	if id, err := strconv.Atoi(ref); err == nil {
+		if err := validatePositiveID("recipe book id", id); err != nil {
+			return 0, err
+		}
 		return id, nil
 	}
 	id, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", ref)
@@ -74,9 +77,9 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	book := strings.TrimSpace(in.Book)
-	if book == "" {
-		return nil, nil, fmt.Errorf("book is required")
+	book, err := cleanName("book", in.Book)
+	if err != nil {
+		return nil, nil, err
 	}
 	bookID, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", book)
 	if err != nil {

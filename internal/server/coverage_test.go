@@ -512,6 +512,17 @@ func TestSetRecipeImageRejectsBadScheme(t *testing.T) {
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "http://127.0.0.1/x.png"}); err == nil {
 		t.Error("expected loopback SSRF rejection")
 	}
+	for _, badURL := range []string{
+		"https://user:pass@example.com/x.png",
+		"https://example.com:99999/x.png",
+		"https://example.com/x.png#frag",
+		"http://[fe80::1%25eth0]/x.png",
+		"http://service.internal/x.png",
+	} {
+		if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: badURL}); err == nil {
+			t.Errorf("expected URL rejection for %s", badURL)
+		}
+	}
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5"}); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Errorf("err = %v, want missing-source rejection", err)
 	}

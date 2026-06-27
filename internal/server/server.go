@@ -138,10 +138,10 @@ func (h *handlers) register(s *mcp.Server) {
 	addTool(s, h, &mcp.Tool{Name: "tandoor_resources", Description: "List non-restricted Tandoor resources available to the generic tools, including preferred designed tools when one exists. Prefer designed tools first."}, h.resourceCatalog)
 	addTool(s, h, &mcp.Tool{Name: "tandoor_list", Description: "Escape hatch: list/search a non-restricted resource collection after designed tools do not cover the workflow. Raw Tandoor responses are returned under data."}, h.genericList)
 	addTool(s, h, &mcp.Tool{Name: "tandoor_get", Description: "Escape hatch: fetch one object from a non-restricted resource after designed tools do not cover the workflow. Raw Tandoor responses are returned under data."}, h.genericGet)
-	addTool(s, h, &mcp.Tool{Name: "tandoor_create", Description: "Escape hatch: create an object in a non-restricted resource from raw fields. Use only with a known-safe serializer contract. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericCreate)
-	addTool(s, h, &mcp.Tool{Name: "tandoor_update", Description: "Escape hatch: update an object in a non-restricted resource (PATCH, or PUT with full=true). Use only with a known-safe serializer contract. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericUpdate)
-	addTool(s, h, &mcp.Tool{Name: "tandoor_delete", Description: "Escape hatch: delete an object from a non-restricted resource. If result status is outcome_unknown, re-read state before retrying; the delete may have committed."}, h.genericDelete)
-	addTool(s, h, &mcp.Tool{Name: "tandoor_action", Description: "Escape hatch: call a known-safe, non-restricted /api/ endpoint not covered by a dedicated tool. Credential, admin, raw-log, user/file/space, empty, dot, and traversal paths are denied. Raw responses are returned under data. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericAction)
+	addTool(s, h, &mcp.Tool{Name: "tandoor_create", Description: "Escape hatch: create an object in an audited generic mutation resource from raw fields. Generic mutations are blocked for recipes, steps, shopping entries, inventory entries, imports, logs, admin/user/file/AI/storage/sync surfaces; prefer designed tools. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericCreate)
+	addTool(s, h, &mcp.Tool{Name: "tandoor_update", Description: "Escape hatch: update an audited generic mutation resource (PATCH, or PUT with full=true). Generic mutations are blocked for recipes, steps, shopping entries, inventory entries, imports, logs, admin/user/file/AI/storage/sync surfaces; prefer designed tools. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericUpdate)
+	addTool(s, h, &mcp.Tool{Name: "tandoor_delete", Description: "Escape hatch: delete an object from an audited generic mutation resource. Generic mutations are blocked for recipes, steps, shopping entries, inventory entries, imports, logs, admin/user/file/AI/storage/sync surfaces; prefer designed tools. If result status is outcome_unknown, re-read state before retrying; the delete may have committed."}, h.genericDelete)
+	addTool(s, h, &mcp.Tool{Name: "tandoor_action", Description: "Escape hatch: call only audited custom /api/ endpoints: recipe/<id>/related/, recipe/flat/, ingredient-parser/post/, fdc-search/, and server-settings/current/. File/download/share/sync/AI/space-switch/admin-like paths are denied. Raw responses are returned under data. If result status is outcome_unknown, re-read state before retrying; the write may have committed."}, h.genericAction)
 }
 
 func addTool[I any](s *mcp.Server, h *handlers, tool *mcp.Tool, fn func(context.Context, *mcp.CallToolRequest, I) (*mcp.CallToolResult, any, error)) {
@@ -169,6 +169,16 @@ func withOperationBudget[I any](h *handlers, fn func(context.Context, *mcp.CallT
 func rawResult(raw json.RawMessage) (*mcp.CallToolResult, any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return jsonResult(map[string]any{"status": "empty_response"})
+	}
+	if len(raw) > maxGenericResultBytes {
+		return jsonErrorResult(map[string]any{
+			"status":                "result_too_large",
+			"message":               "Tandoor response is too large for a raw MCP result; narrow the query or use pagination",
+			"max_bytes":             maxGenericResultBytes,
+			"received_bytes":        len(raw),
+			"body_truncated":        true,
+			"body_truncated_reason": "generic result size limit",
+		})
 	}
 	var structured any
 	if err := json.Unmarshal(raw, &structured); err != nil {

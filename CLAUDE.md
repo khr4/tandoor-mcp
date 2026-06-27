@@ -132,10 +132,14 @@ This codebase is maintained to a strict standard. Hold the line:
 - **New CRUD resource:** add one row to `resources` in `resources.go`. If it can
   expose credentials, account/admin state, uploaded files, logs, invitations,
   personal settings or other raw PII, add it to `restrictedResources` too.
-- **New custom endpoint:** it already works through `tandoor_action`. Add a
-  dedicated tool only when (a) the request/response contract is verified and (b) a
-  typed input meaningfully helps the caller. Put it in `recipes.go` (or a sibling),
-  give it a precise `jsonschema` description per field, and cover it with an
-  `httptest`-backed test asserting the exact path/method/body.
+- **New generic mutation:** add the resource to the audited mutation allowlist
+  only after checking that raw create/update/delete cannot touch recipes, steps,
+  shopping entries, inventory entries, imports, logs, admin/user/file/AI/storage/
+  sync state, or other sensitive surfaces. Prefer a designed tool for workflows.
+- **New custom endpoint:** `tandoor_action` is allowlist-only. Add a custom path
+  to that allowlist only for read/helper endpoints whose response is safe for raw
+  model consumption; otherwise add a dedicated tool once the request/response
+  contract is verified. Cover either path with an `httptest`-backed test asserting
+  the exact method, path, query and body.
 - Optional fields **must** be tagged `,omitempty` (the SDK marks any field without
   it as required). Required fields omit it.

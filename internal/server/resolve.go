@@ -52,7 +52,10 @@ func (h *handlers) searchPage(ctx context.Context, resourcePath, name string, pa
 // exactMatchIDs returns every object id whose name (or plural name) exactly
 // matches, case-insensitively, paginating up to the page cap.
 func (h *handlers) exactMatchIDs(ctx context.Context, resourcePath, name string) ([]int, error) {
-	name = strings.TrimSpace(name)
+	name, err := cleanOptionalName(resourcePath+" name", name)
+	if err != nil {
+		return nil, err
+	}
 	var ids []int
 	if name == "" {
 		return ids, nil
@@ -77,7 +80,10 @@ func (h *handlers) exactMatchIDs(ctx context.Context, resourcePath, name string)
 // resolveExistingID finds an object id by exact (case-insensitive) name match
 // without creating anything. found is false if no such object exists.
 func (h *handlers) resolveExistingID(ctx context.Context, resourcePath, name string) (id int, found bool, err error) {
-	name = strings.TrimSpace(name)
+	name, err = cleanOptionalName(resourcePath+" name", name)
+	if err != nil {
+		return 0, false, err
+	}
 	if name == "" {
 		return 0, false, nil
 	}
@@ -124,9 +130,9 @@ func (h *handlers) resolveUniqueExistingID(ctx context.Context, resourcePath, ki
 // This performs a write by design and must only be called from tools whose
 // contract is "create if missing".
 func (h *handlers) getOrCreateID(ctx context.Context, resourcePath, name string) (int, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return 0, fmt.Errorf("name is required")
+	name, err := cleanName(resourcePath+" name", name)
+	if err != nil {
+		return 0, err
 	}
 	raw, err := h.c.Do(ctx, http.MethodPost, resourcePath+"/", nil, map[string]any{"name": name})
 	if err != nil {
@@ -167,11 +173,14 @@ func (h *handlers) resolveRequiredIDs(ctx context.Context, resourcePath, kind st
 // name. A name matching more than one recipe is an error rather than a silent
 // first-match pick, since the resolved id feeds destructive operations.
 func (h *handlers) resolveRecipe(ctx context.Context, ref string) (int, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return 0, fmt.Errorf("a recipe (name or id) is required")
+	ref, err := cleanRef("recipe", ref)
+	if err != nil {
+		return 0, err
 	}
 	if id, err := strconv.Atoi(ref); err == nil {
+		if err := validatePositiveID("recipe id", id); err != nil {
+			return 0, err
+		}
 		return id, nil
 	}
 	ids, err := h.exactMatchIDs(ctx, "recipe", ref)

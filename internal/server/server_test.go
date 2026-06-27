@@ -122,6 +122,12 @@ func TestGenericListRejectsInvalidPageSize(t *testing.T) {
 	if _, _, err := h.genericList(context.Background(), nil, listInput{Resource: "recipe", PageSize: &tooHigh}); err == nil {
 		t.Fatal("expected page_size rejection")
 	}
+	if _, _, err := h.genericList(context.Background(), nil, listInput{Resource: "recipe", Filters: map[string]string{"bad/key": "1"}}); err == nil {
+		t.Fatal("expected filter key rejection")
+	}
+	if _, _, err := h.genericList(context.Background(), nil, listInput{Resource: "recipe", Ordering: "name;drop"}); err == nil {
+		t.Fatal("expected ordering rejection")
+	}
 }
 
 func TestUnknownResourceErrors(t *testing.T) {
@@ -139,6 +145,9 @@ func TestGenericGetPath(t *testing.T) {
 	}
 	if rec.path != "/api/recipe/42/" {
 		t.Errorf("path = %q, want /api/recipe/42/", rec.path)
+	}
+	if _, _, err := h.genericGet(context.Background(), nil, getInput{Resource: "recipe", ID: "../42"}); err == nil {
+		t.Error("expected invalid id rejection")
 	}
 }
 
@@ -162,6 +171,64 @@ func TestGenericCreatePostsData(t *testing.T) {
 	if !strings.Contains(rec.body, `"name":"Vegan"`) {
 		t.Errorf("body = %q, want name=Vegan", rec.body)
 	}
+}
+
+func TestGenericMutationsRequireAllowlistedResources(t *testing.T) {
+	h := newHandlers(t, &recorder{})
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"create recipe", callCreate(h, "recipe")},
+		{"update step", callUpdate(h, "step")},
+		{"delete ingredient", callDelete(h, "ingredient")},
+		{"create inventory entry", callCreate(h, "inventory-entry")},
+	} {
+		if tc.err == nil {
+			t.Errorf("%s should be rejected", tc.name)
+		}
+	}
+}
+
+func TestGenericBodyValidationRejectsUnsafePayloads(t *testing.T) {
+	h := newHandlers(t, &recorder{})
+	if _, _, err := h.genericCreate(context.Background(), nil, createInput{
+		Resource: "keyword",
+		Data:     map[string]any{"name": "bad\x00name"},
+	}); err == nil {
+		t.Fatal("expected NUL rejection")
+	}
+	deep := map[string]any{}
+	cursor := deep
+	for i := 0; i < maxGenericDepth+2; i++ {
+		next := map[string]any{}
+		cursor["child"] = next
+		cursor = next
+	}
+	if _, _, err := h.genericCreate(context.Background(), nil, createInput{Resource: "keyword", Data: deep}); err == nil {
+		t.Fatal("expected depth rejection")
+	}
+	if _, _, err := h.genericCreate(context.Background(), nil, createInput{
+		Resource: "keyword",
+		Data:     map[string]any{"name": strings.Repeat("x", maxGenericBodyStringRunes+1)},
+	}); err == nil {
+		t.Fatal("expected large string rejection")
+	}
+}
+
+func callCreate(h *handlers, resource string) error {
+	_, _, err := h.genericCreate(context.Background(), nil, createInput{Resource: resource, Data: map[string]any{"name": "x"}})
+	return err
+}
+
+func callUpdate(h *handlers, resource string) error {
+	_, _, err := h.genericUpdate(context.Background(), nil, updateInput{Resource: resource, ID: "1", Data: map[string]any{"name": "x"}})
+	return err
+}
+
+func callDelete(h *handlers, resource string) error {
+	_, _, err := h.genericDelete(context.Background(), nil, deleteInput{Resource: resource, ID: "1"})
+	return err
 }
 
 func TestGenericUpdateMethodSwitches(t *testing.T) {
@@ -229,6 +296,22 @@ func TestActionValidatesMethodAndPath(t *testing.T) {
 	if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: "api/./access-token/"}); err == nil {
 		t.Error("expected error for dot-segment restricted endpoint bypass")
 	}
+	for _, blocked := range []string{
+		"download-file/1/",
+		"get_recipe_file/1/",
+		"get_external_file_link/1/",
+		"switch-active-space/2/",
+		"ai-import/",
+		"ai-step-sort/",
+		"sync_all/",
+		"share-link/1/",
+		"import-open-data/",
+		"reset-food-inheritance/",
+	} {
+		if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: blocked}); err == nil {
+			t.Errorf("expected %s to be blocked", blocked)
+		}
+	}
 }
 
 func TestActionCalls(t *testing.T) {
@@ -236,7 +319,7 @@ func TestActionCalls(t *testing.T) {
 	h := newHandlers(t, rec)
 	res, _, err := h.genericAction(context.Background(), nil, actionInput{
 		Method: "get",
-		Path:   "switch-active-space/2/",
+		Path:   "recipe/5/related/",
 		Query:  map[string]string{"verbose": "1"},
 		QueryParams: []queryParam{
 			{Name: "tag", Value: "a"},
@@ -246,7 +329,7 @@ func TestActionCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("genericAction: %v", err)
 	}
-	if rec.method != http.MethodGet || rec.path != "/api/switch-active-space/2/" {
+	if rec.method != http.MethodGet || rec.path != "/api/recipe/5/related/" {
 		t.Errorf("got %s %s", rec.method, rec.path)
 	}
 	if !strings.Contains(rec.query, "verbose=1") || strings.Count(rec.query, "tag=") != 2 {
@@ -258,6 +341,25 @@ func TestActionCalls(t *testing.T) {
 	out := structuredContentMap(t, res)
 	if _, ok := out["data"]; !ok {
 		t.Fatalf("generic action structuredContent = %v, want data envelope", out)
+	}
+}
+
+func TestActionAllowlistSafeHelpers(t *testing.T) {
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "recipe/5/related/"},
+		{http.MethodGet, "recipe/flat/"},
+		{http.MethodPost, "ingredient-parser/post/"},
+		{http.MethodGet, "fdc-search/"},
+		{http.MethodGet, "server-settings/current/"},
+	} {
+		rec := &recorder{reply: `{}`}
+		h := newHandlers(t, rec)
+		if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: tc.method, Path: tc.path}); err != nil {
+			t.Errorf("%s %s rejected: %v", tc.method, tc.path, err)
+		}
 	}
 }
 
@@ -290,6 +392,18 @@ func TestRawResultEnvelopesNonObjectPayloads(t *testing.T) {
 	}
 	if len(out["body_excerpt"].(string)) > toolErrorExcerptRunes+len("<html>") {
 		t.Fatalf("body excerpt too large: %d", len(out["body_excerpt"].(string)))
+	}
+
+	res, _, err = rawResult([]byte(`{"data":"` + strings.Repeat("x", maxGenericResultBytes) + `"}`))
+	if err != nil {
+		t.Fatalf("rawResult too large: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("oversize raw result should be an MCP error")
+	}
+	out = structuredContentMap(t, res)
+	if out["status"] != "result_too_large" {
+		t.Fatalf("oversize structuredContent = %v, want result_too_large", out)
 	}
 }
 

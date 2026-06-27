@@ -59,10 +59,20 @@ func (h *handlers) buildSteps(ctx context.Context, steps []stepInput) ([]map[str
 		refs  []ref
 	)
 	for si, st := range steps {
+		instruction, err := cleanOptionalFreeText(fmt.Sprintf("step %d instruction", si+1), st.Instruction)
+		if err != nil {
+			return nil, err
+		}
+		steps[si].Instruction = instruction
 		for ii, ing := range st.Ingredients {
 			// A header is emitted verbatim; never send its text to the parser.
 			if !ing.IsHeader && strings.TrimSpace(ing.Text) != "" {
-				texts = append(texts, ing.Text)
+				text, err := cleanOptionalShortText(fmt.Sprintf("step %d ingredient %d text", si+1, ii+1), ing.Text)
+				if err != nil {
+					return nil, err
+				}
+				steps[si].Ingredients[ii].Text = text
+				texts = append(texts, text)
 				refs = append(refs, ref{si, ii})
 			}
 		}
@@ -135,6 +145,11 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		if text == "" {
 			return nil, fmt.Errorf("ingredient header needs note or text")
 		}
+		var err error
+		text, err = cleanName("ingredient header", text)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{
 			"is_header":     true,
 			"no_amount":     true,
@@ -178,27 +193,39 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		return m, nil
 	}
 
-	food := strings.TrimSpace(in.Food)
-	if food == "" {
+	food, err := cleanName("food", in.Food)
+	if err != nil {
 		return nil, fmt.Errorf("ingredient needs either text or a food name")
+	}
+	note, err := cleanOptionalShortText("ingredient note", in.Note)
+	if err != nil {
+		return nil, err
 	}
 	// No number given means no amount, even if a unit (e.g. "pinch") is present —
 	// otherwise the ingredient would render as "0 pinch salt".
 	noAmount := in.Amount == nil
+	unit, err := cleanOptionalName("unit", in.Unit)
+	if err != nil {
+		return nil, err
+	}
+	display := in
+	display.Food = food
+	display.Note = note
+	display.Unit = unit
 	m := map[string]any{
 		"food":          map[string]any{"name": food},
-		"note":          in.Note,
+		"note":          note,
 		"no_amount":     noAmount,
 		"unit":          nil,
-		"original_text": synthOriginal(in),
+		"original_text": synthOriginal(display),
 	}
 	if in.Amount != nil {
 		m["amount"] = *in.Amount
 	} else {
 		m["amount"] = 0
 	}
-	if u := strings.TrimSpace(in.Unit); u != "" {
-		m["unit"] = map[string]any{"name": u}
+	if unit != "" {
+		m["unit"] = map[string]any{"name": unit}
 	}
 	return m, nil
 }
