@@ -1,8 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"os"
@@ -424,16 +429,78 @@ func TestImportAllowsDroppedIngredientWhenExplicit(t *testing.T) {
 
 func TestSetRecipeImageURL(t *testing.T) {
 	var path string
+	var gotImageURL string
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.Path
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("NextPart: %v", err)
+			}
+			if part.FormName() == "image_url" {
+				b, _ := io.ReadAll(part)
+				gotImageURL = string(b)
+			}
+		}
 		_, _ = io.WriteString(w, `{}`)
 	})
-	_, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "https://img.example/x.png"})
+	imageURL := "https://upload.wikimedia.org/wikipedia/commons/3/3f/JPEG_example_flower.jpg"
+	_, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: imageURL})
 	if err != nil {
 		t.Fatalf("setRecipeImage: %v", err)
 	}
 	if path != "/api/recipe/5/image/" {
 		t.Errorf("path = %s", path)
+	}
+	if gotImageURL != imageURL {
+		t.Errorf("image_url field = %q, want %q", gotImageURL, imageURL)
+	}
+}
+
+func TestSetRecipeImageURLFailureExplainsTandoorSideProcessing(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/recipe/5/image/" || r.Method != http.MethodPut {
+			t.Fatalf("request = %s %s, want PUT /api/recipe/5/image/", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `AttributeError: 'NoneType' object has no attribute 'save'
+recipes/views/api.py, line 1876, in image
+img = handle_image(request, image, filetype)
+obj.image.save(name, img)`)
+	})
+	res, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{
+		Recipe:   "5",
+		ImageURL: "https://upload.wikimedia.org/wikipedia/commons/3/3f/JPEG_example_flower.jpg",
+	})
+	if err != nil {
+		t.Fatalf("setRecipeImage: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("result IsError = false, want true: %s", resultText(t, res))
+	}
+	out := structuredContentMap(t, res)
+	if out["status"] != "outcome_unknown" {
+		t.Fatalf("status = %v, want outcome_unknown: %s", out["status"], resultText(t, res))
+	}
+	if out["operation"] != "set_recipe_image_url" {
+		t.Errorf("operation = %v", out["operation"])
+	}
+	if out["image_url_host"] != "upload.wikimedia.org" {
+		t.Errorf("image_url_host = %v", out["image_url_host"])
+	}
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, "fetched image_url") || !strings.Contains(hint, "processing") || !strings.Contains(hint, "image_base64") {
+		t.Errorf("hint = %q, want Tandoor-side image processing guidance", hint)
+	}
+	if !strings.Contains(resultText(t, res), "handle_image") || !strings.Contains(resultText(t, res), "NoneType") {
+		t.Errorf("result = %s, want upstream body excerpt", resultText(t, res))
 	}
 }
 
@@ -450,6 +517,12 @@ func TestSetRecipeImageRejectsBadScheme(t *testing.T) {
 	}
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: "pie.png", ImageURL: "https://img.example/x.png"}); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Errorf("err = %v, want double-source rejection", err)
+	}
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "https://img.example/x.png", ImageMIMEType: "image/png"}); err == nil || !strings.Contains(err.Error(), "only valid with image_base64") {
+		t.Errorf("err = %v, want stray MIME rejection", err)
+	}
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: "pie.png", ImageBase64: "AAAA", ImageMIMEType: "image/png"}); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("err = %v, want path/base64 exclusivity rejection", err)
 	}
 }
 
@@ -478,6 +551,150 @@ func TestSetRecipeImagePathGating(t *testing.T) {
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: outside}); err == nil {
 		t.Error("path outside allowed dir must be rejected")
 	}
+}
+
+func TestSetRecipeImageBase64Upload(t *testing.T) {
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	expected, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPath, gotFileName string
+	var gotFileBody []byte
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("NextPart: %v", err)
+			}
+			if part.FormName() == "image" {
+				gotFileName = part.FileName()
+				gotFileBody, _ = io.ReadAll(part)
+			}
+		}
+		_, _ = io.WriteString(w, `{}`)
+	})
+	res, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{
+		Recipe:        "5",
+		ImageBase64:   pngBase64,
+		ImageMIMEType: "image/png",
+	})
+	if err != nil {
+		t.Fatalf("setRecipeImage: %v", err)
+	}
+	if gotPath != "/api/recipe/5/image/" {
+		t.Errorf("path = %s", gotPath)
+	}
+	if gotFileName != "generated.png" {
+		t.Errorf("file name = %q, want generated.png", gotFileName)
+	}
+	if string(gotFileBody) != string(expected) {
+		t.Errorf("uploaded bytes = %x, want %x", gotFileBody, expected)
+	}
+	if !strings.Contains(resultText(t, res), `"from": "base64"`) || !strings.Contains(resultText(t, res), `"mime_type": "image/png"`) {
+		t.Errorf("result = %s", resultText(t, res))
+	}
+}
+
+func TestSetRecipeImageDataURIUpload(t *testing.T) {
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	var gotFileName string
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		gotFileName = part.FileName()
+		_, _ = io.Copy(io.Discard, part)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	_, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{
+		Recipe:      "5",
+		ImageBase64: "data:image/png;base64," + pngBase64,
+	})
+	if err != nil {
+		t.Fatalf("setRecipeImage: %v", err)
+	}
+	if gotFileName != "generated.png" {
+		t.Errorf("file name = %q, want generated.png", gotFileName)
+	}
+}
+
+func TestDecodeInlineImageDataURIAndValidation(t *testing.T) {
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	data, mimeType, err := decodeInlineImage("data:image/png;base64,"+pngBase64, "")
+	if err != nil {
+		t.Fatalf("decodeInlineImage data URI: %v", err)
+	}
+	if len(data) == 0 || mimeType != "image/png" {
+		t.Fatalf("data len=%d mime=%q, want PNG bytes", len(data), mimeType)
+	}
+	if _, _, err := decodeInlineImage(pngBase64, ""); err == nil || !strings.Contains(err.Error(), "image_mime_type") {
+		t.Errorf("err = %v, want missing MIME rejection", err)
+	}
+	if _, _, err := decodeInlineImage("data:image/png;base64,"+pngBase64, "image/jpeg"); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("err = %v, want mismatched MIME rejection", err)
+	}
+	if _, _, err := decodeInlineImage(base64.StdEncoding.EncodeToString([]byte("not a png")), "image/png"); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Errorf("err = %v, want magic-byte rejection", err)
+	}
+	pngSignatureOnly := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	if _, _, err := decodeInlineImage(pngSignatureOnly, "image/png"); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Errorf("err = %v, want truncated PNG rejection", err)
+	}
+	jpegBase64 := base64.StdEncoding.EncodeToString(testJPEGBytes(t))
+	if data, mimeType, err := decodeInlineImage(jpegBase64, "image/jpeg"); err != nil || len(data) == 0 || mimeType != "image/jpeg" {
+		t.Fatalf("decodeInlineImage JPEG = len %d mime %q err %v", len(data), mimeType, err)
+	}
+	webpBase64 := base64.StdEncoding.EncodeToString(testWebPContainer())
+	if data, mimeType, err := decodeInlineImage(webpBase64, "image/webp"); err != nil || len(data) == 0 || mimeType != "image/webp" {
+		t.Fatalf("decodeInlineImage WebP = len %d mime %q err %v", len(data), mimeType, err)
+	}
+	tooLarge := base64.StdEncoding.EncodeToString(make([]byte, maxInlineImageBytes+1))
+	if _, _, err := decodeInlineImage(tooLarge, "image/png"); err == nil || !strings.Contains(err.Error(), "inline limit") {
+		t.Errorf("err = %v, want inline size rejection", err)
+	}
+	tooManyChars := strings.Repeat("A", maxInlineImageEncodedChars+1)
+	if _, _, err := decodeInlineImage(tooManyChars, "image/png"); err == nil || !strings.Contains(err.Error(), "character inline limit") {
+		t.Errorf("err = %v, want encoded size preflight rejection", err)
+	}
+}
+
+func testJPEGBytes(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("jpeg.Encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func testWebPContainer() []byte {
+	data := make([]byte, 30)
+	copy(data[0:4], "RIFF")
+	riffSize := len(data) - 8
+	data[4] = byte(riffSize)
+	data[5] = byte(riffSize >> 8)
+	data[6] = byte(riffSize >> 16)
+	data[7] = byte(riffSize >> 24)
+	copy(data[8:12], "WEBP")
+	copy(data[12:16], "VP8X")
+	data[16] = 10
+	return data
 }
 
 // ---- planning ----

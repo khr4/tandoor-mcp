@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg" // register JPEG decoder for inline image validation
+	_ "image/png"  // register PNG decoder for inline image validation
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +29,13 @@ import (
 
 // maxImageBytes caps the size of a local image upload.
 const maxImageBytes = 16 << 20
+
+// maxInlineImageBytes caps image_base64 uploads. Inline JSON payloads are more
+// expensive for clients and agents than local files, so keep this below the file
+// upload cap.
+const maxInlineImageBytes = 8 << 20
+
+const maxInlineImageEncodedChars = 12 << 20
 
 const maxFindRecipesLimit = 100
 
@@ -580,23 +592,37 @@ func (h *handlers) deleteRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 // ---- set_recipe_image ----
 
 type recipeImageInput struct {
-	Recipe    string `json:"recipe" jsonschema:"recipe name or numeric id"`
-	ImagePath string `json:"image_path,omitempty" jsonschema:"local image file path; only allowed within the server's configured image directory"`
-	ImageURL  string `json:"image_url,omitempty" jsonschema:"public remote image URL (http/https; no credentials, localhost, private, link-local, or internal hosts) for Tandoor to fetch and store"`
+	Recipe        string `json:"recipe" jsonschema:"recipe name or numeric id"`
+	ImagePath     string `json:"image_path,omitempty" jsonschema:"local image file path; only allowed within the server's configured image directory"`
+	ImageURL      string `json:"image_url,omitempty" jsonschema:"public remote image URL (http/https; no credentials, localhost, private, link-local, or internal hosts) for Tandoor to fetch and store"`
+	ImageBase64   string `json:"image_base64,omitempty" jsonschema:"base64-encoded image bytes from an image generation result, or a data:image/...;base64 URI; max decoded size 8 MiB"`
+	ImageMIMEType string `json:"image_mime_type,omitempty" jsonschema:"MIME type for image_base64, one of image/png, image/jpeg, image/webp; optional when image_base64 is a data URI"`
 }
 
-// setRecipeImage sets a recipe image from a (gated) local file or a remote URL.
+// setRecipeImage sets a recipe image from a gated local file, public remote URL,
+// or bounded inline base64 generated image.
 func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, in recipeImageInput) (*mcp.CallToolResult, any, error) {
+	hasPath := strings.TrimSpace(in.ImagePath) != ""
+	hasURL := strings.TrimSpace(in.ImageURL) != ""
+	hasInline := strings.TrimSpace(in.ImageBase64) != ""
+	hasMIME := strings.TrimSpace(in.ImageMIMEType) != ""
+	sources := 0
+	for _, ok := range []bool{hasPath, hasURL, hasInline} {
+		if ok {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, nil, fmt.Errorf("provide exactly one of image_path, image_url, or image_base64")
+	}
+	if hasMIME && !hasInline {
+		return nil, nil, fmt.Errorf("image_mime_type is only valid with image_base64")
+	}
 	id, err := h.resolveRecipe(ctx, in.Recipe)
 	if err != nil {
 		return nil, nil, err
 	}
 	path := fmt.Sprintf("recipe/%d/image/", id)
-	hasPath := strings.TrimSpace(in.ImagePath) != ""
-	hasURL := strings.TrimSpace(in.ImageURL) != ""
-	if hasPath == hasURL {
-		return nil, nil, fmt.Errorf("provide exactly one of image_path or image_url")
-	}
 	switch {
 	case hasPath:
 		f, size, err := h.openSafeImage(in.ImagePath)
@@ -616,11 +642,91 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 			return nil, nil, err
 		}
 		if _, err := h.c.Upload(ctx, http.MethodPut, path, map[string]string{"image_url": in.ImageURL}, "", "", nil); err != nil {
-			return nil, nil, err
+			return imageURLUploadErrorResult(err, in.ImageURL)
 		}
 		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "url"})
+	case hasInline:
+		data, mimeType, err := decodeInlineImage(in.ImageBase64, in.ImageMIMEType)
+		if err != nil {
+			return nil, nil, err
+		}
+		fileName := "generated" + imageExt(mimeType)
+		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", fileName, bytes.NewReader(data)); err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "base64", "mime_type": mimeType, "bytes": len(data)})
 	}
-	return nil, nil, fmt.Errorf("provide exactly one of image_path or image_url")
+	return nil, nil, fmt.Errorf("provide exactly one of image_path, image_url, or image_base64")
+}
+
+func imageURLUploadErrorResult(err error, imageURL string) (*mcp.CallToolResult, any, error) {
+	extra := map[string]any{
+		"operation": "set_recipe_image_url",
+	}
+	if host := imageURLHost(imageURL); host != "" {
+		extra["image_url_host"] = host
+	}
+
+	var unknown *tandoor.OutcomeUnknownError
+	if errors.As(err, &unknown) {
+		out := outcomeUnknownObject(unknown, extra)
+		out["message"] = "Tandoor failed while fetching or processing image_url; the image write outcome is unknown. Re-read the recipe before retrying, then inspect the upstream error if the image was not stored."
+		out["hint"] = imageURLTandoorFailureHint(unknown.Cause)
+		return jsonErrorResult(out)
+	}
+
+	out := toolErrorObject(err)
+	for k, v := range extra {
+		out[k] = v
+	}
+	var apiErr *tandoor.APIError
+	if errors.As(err, &apiErr) {
+		out["message"] = "Tandoor failed while fetching or processing image_url."
+		out["hint"] = imageURLTandoorFailureHint(apiErr)
+	} else {
+		out["hint"] = "The MCP server did not complete the request to Tandoor. Check MCP-to-Tandoor connectivity first; if Tandoor returns an upstream error after receiving image_url, Tandoor's own runtime must be able to reach the image URL."
+	}
+	return jsonErrorResult(out)
+}
+
+func imageURLTandoorFailureHint(err error) string {
+	if imageURLLooksLikeProcessingBug(err) {
+		return "Tandoor fetched image_url but failed while processing the response as an image. Check whether the URL returns actual image bytes to Tandoor, not an HTML/error/hotlink page or unsupported/truncated image; Tandoor versions with an unguarded handle_image failure may return HTTP 500. Use image_base64 or image_path to upload known image bytes through tandoor-mcp."
+	}
+	return "Tandoor fetches and processes image_url server-side. Check whether the URL is reachable from the Tandoor runtime, whether it returns actual supported image bytes after redirects, and the Tandoor pod/server egress/network policy, DNS, TLS/proxy path if fetch fails; use image_base64 or image_path to upload bytes through tandoor-mcp when remote URL handling fails."
+}
+
+func imageURLLooksLikeProcessingBug(err error) bool {
+	var apiErr *tandoor.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	body := strings.ToLower(apiErr.Body)
+	if body == "" {
+		return false
+	}
+	processingSignals := []string{
+		"handle_image",
+		"object has no attribute 'save'",
+		"object has no attribute \"save\"",
+		"none",
+		"attributeerror",
+	}
+	matches := 0
+	for _, signal := range processingSignals {
+		if strings.Contains(body, signal) {
+			matches++
+		}
+	}
+	return matches >= 2
+}
+
+func imageURLHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.Trim(strings.ToLower(u.Hostname()), ".")
 }
 
 // errImagePathDenied is a single, uniform error for any local image path that is
@@ -667,6 +773,180 @@ func (h *handlers) openSafeImage(p string) (*os.File, int64, error) {
 		return nil, 0, errImagePathDenied
 	}
 	return f, fi.Size(), nil
+}
+
+func decodeInlineImage(raw, mimeType string) ([]byte, string, error) {
+	raw = strings.TrimSpace(raw)
+	mimeType = strings.TrimSpace(strings.ToLower(mimeType))
+	if len(raw) > maxInlineImageEncodedChars {
+		return nil, "", fmt.Errorf("image_base64 is larger than the %d character inline limit", maxInlineImageEncodedChars)
+	}
+	if hasASCIIPrefixFold(raw, "data:") {
+		header, data, ok := strings.Cut(raw, ",")
+		if !ok {
+			return nil, "", fmt.Errorf("image_base64 data URI is missing a comma separator")
+		}
+		parsedType, err := parseImageDataURIHeader(header)
+		if err != nil {
+			return nil, "", err
+		}
+		if mimeType != "" && mimeType != parsedType {
+			return nil, "", fmt.Errorf("image_mime_type %q does not match data URI MIME type %q", mimeType, parsedType)
+		}
+		mimeType = parsedType
+		raw = data
+	}
+	if mimeType == "" {
+		return nil, "", fmt.Errorf("image_mime_type is required when image_base64 is not a data URI")
+	}
+	if !allowedInlineImageMIME(mimeType) {
+		return nil, "", fmt.Errorf("image_mime_type must be image/png, image/jpeg, or image/webp")
+	}
+	encoded := compactBase64(raw)
+	if encoded == "" {
+		return nil, "", fmt.Errorf("image_base64 is empty")
+	}
+	if base64.StdEncoding.DecodedLen(len(encoded)) > maxInlineImageBytes+2 {
+		return nil, "", fmt.Errorf("image_base64 decodes to more than the %d byte limit", maxInlineImageBytes)
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return nil, "", fmt.Errorf("image_base64 is not valid standard base64: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("image_base64 decodes to an empty image")
+	}
+	if len(data) > maxInlineImageBytes {
+		return nil, "", fmt.Errorf("image is %d bytes, larger than the %d byte inline limit", len(data), maxInlineImageBytes)
+	}
+	if !imageMagicMatches(mimeType, data) {
+		return nil, "", fmt.Errorf("image_base64 bytes do not match %s", mimeType)
+	}
+	return data, mimeType, nil
+}
+
+func parseImageDataURIHeader(header string) (string, error) {
+	header = strings.TrimSpace(header)
+	if !hasASCIIPrefixFold(header, "data:") {
+		return "", fmt.Errorf("image_base64 data URI must start with data")
+	}
+	parts := strings.Split(header[len("data:"):], ";")
+	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" {
+		return "", fmt.Errorf("image_base64 data URI must include an image MIME type")
+	}
+	mimeType := strings.ToLower(strings.TrimSpace(parts[0]))
+	hasBase64 := false
+	for _, p := range parts[1:] {
+		if strings.EqualFold(strings.TrimSpace(p), "base64") {
+			hasBase64 = true
+			break
+		}
+	}
+	if !hasBase64 {
+		return "", fmt.Errorf("image_base64 data URI must declare ;base64")
+	}
+	if !allowedInlineImageMIME(mimeType) {
+		return "", fmt.Errorf("data URI MIME type must be image/png, image/jpeg, or image/webp")
+	}
+	return mimeType, nil
+}
+
+func compactBase64(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case ' ', '\n', '\r', '\t':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func hasASCIIPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		c := s[i]
+		p := prefix[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if 'A' <= p && p <= 'Z' {
+			p += 'a' - 'A'
+		}
+		if c != p {
+			return false
+		}
+	}
+	return true
+}
+
+func allowedInlineImageMIME(mimeType string) bool {
+	switch mimeType {
+	case "image/png", "image/jpeg", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageExt(mimeType string) string {
+	switch mimeType {
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".img"
+	}
+}
+
+func imageMagicMatches(mimeType string, data []byte) bool {
+	switch mimeType {
+	case "image/png", "image/jpeg":
+		format, err := imageFormat(data)
+		if err != nil {
+			return false
+		}
+		return (mimeType == "image/png" && format == "png") || (mimeType == "image/jpeg" && format == "jpeg")
+	case "image/webp":
+		return validWebPContainer(data)
+	default:
+		return false
+	}
+}
+
+func imageFormat(data []byte) (string, error) {
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	return format, err
+}
+
+func validWebPContainer(data []byte) bool {
+	if len(data) < 20 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return false
+	}
+	riffSize := int(data[4]) | int(data[5])<<8 | int(data[6])<<16 | int(data[7])<<24
+	if riffSize != len(data)-8 {
+		return false
+	}
+	chunk := string(data[12:16])
+	if chunk != "VP8 " && chunk != "VP8L" && chunk != "VP8X" {
+		return false
+	}
+	chunkSize := int(data[16]) | int(data[17])<<8 | int(data[18])<<16 | int(data[19])<<24
+	if chunkSize <= 0 || chunkSize > len(data)-20 {
+		return false
+	}
+	if chunk == "VP8X" && chunkSize < 10 {
+		return false
+	}
+	return true
 }
 
 // ---- find_related_recipes ----

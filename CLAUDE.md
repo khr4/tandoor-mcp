@@ -50,6 +50,21 @@ endpoints. Prefer a designed tool that hides nested serializer shapes and id
 plumbing over exposing raw CRUD. When adding a workflow, resolve names to ids and
 keep quantities (amount + unit) first-class.
 
+Generated-image uploads use the common LLM/MCP base64 shape: `image_base64`
+contains raw base64 bytes or a `data:image/...;base64,...` URI, and
+`image_mime_type` carries `image/png`, `image/jpeg`, or `image/webp` when the MIME
+type is not embedded in a data URI. Keep the inline decoded-size cap small enough
+for agent context and JSON payload safety.
+
+For `set_recipe_image` with `image_url`, tandoor-mcp validates and forwards the
+URL, then Tandoor fetches and processes it server-side. Diagnose public URL
+upload failures from Tandoor's upstream response first: `handle_image`/`None`
+tracebacks mean the fetch likely succeeded but the returned bytes were not a
+processable image for Tandoor. Otherwise check the Tandoor runtime's pod/server
+egress, network policy, DNS, TLS/proxy configuration and remote-site blocking.
+Use `image_base64` or `image_path` when Tandoor cannot handle external image
+URLs.
+
 Tools register with `mcp.AddTool[In, any]`: typed input struct (the SDK infers the
 input JSON Schema), output type `any` so handlers can return readable text content
 plus `structuredContent` without per-tool output-schema constraints.

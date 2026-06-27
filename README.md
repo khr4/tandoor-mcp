@@ -148,7 +148,7 @@ Recipes — every recipe argument accepts a **name or id**:
 | `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. Keyword edits require `expected_revision` from `get_recipe`. |
 | `set_recipe_steps` | Replace a recipe's steps/ingredients with a non-empty list — read `get_recipe`'s `steps[]` and `edit_revision`, edit, pass back with `expected_revision`. This tool does not clear all steps. |
 | `delete_recipe` | Delete a recipe. |
-| `set_recipe_image` | Set an image from exactly one source: a public remote URL, or a regular local file within `TANDOOR_IMAGE_DIR`. URL credentials, localhost, private, link-local and internal hosts are rejected. |
+| `set_recipe_image` | Set an image from exactly one source: a public remote URL, a regular local file within `TANDOOR_IMAGE_DIR`, or inline generated image bytes via `image_base64`. `image_url` is fetched and processed by Tandoor server-side, not by tandoor-mcp; upstream 5xx/timeout errors can mean Tandoor received non-image/unsupported/truncated bytes, hit an image-processing bug, or cannot reach the URL from its pod/server network. Use `image_base64`/`image_path` to upload bytes through tandoor-mcp. `image_base64` accepts raw base64 plus `image_mime_type`, or a `data:image/...;base64,...` URI. PNG, JPEG and WebP are allowed up to 8 MiB decoded. URL credentials, localhost, private, link-local and internal hosts are rejected. |
 | `find_related_recipes` | Recipes sharing keywords/foods; results are returned under `recipes`. |
 | `log_cooked` | Record a cook + rating (how recipes get rated). |
 | `add_recipe_to_book` / `remove_recipe_from_book` / `list_recipe_books` | Organize recipes into books (book created on first add). If a named book cannot be resolved, use `list_recipe_books` before retrying. Filter by book with `find_recipes`. |
@@ -173,6 +173,22 @@ Ingredient quantities are always kept explicit: amounts and units are split out
 For any mutation returning `outcome_unknown` or `partial_outcome_unknown`, re-read
 the affected recipe, shopping list, pantry, taxonomy or book state before
 retrying. The upstream request reached Tandoor and may have committed.
+
+For generated images, pass the final base64 bytes directly to `set_recipe_image`
+as `image_base64`. This matches OpenAI Image API `data[0].b64_json`, OpenAI
+Responses API `image_generation_call.result`, and MCP `ImageContent.data`; pass
+the associated MIME type as `image_mime_type` unless the value is already a
+`data:image/...;base64,...` URI.
+
+For URL images, tandoor-mcp only validates and forwards `image_url`; Tandoor does
+the remote download and image processing. If Tandoor returns a 500/timeout while
+setting a public URL image, inspect the upstream body first. A traceback around
+`handle_image` or saving a `None` object means Tandoor likely fetched something
+that was not processable image bytes; otherwise check reachability from the
+Tandoor runtime: egress/network policy, DNS, TLS/proxy configuration and
+remote-site blocking. The error result includes the URL host, upstream body
+excerpt and this hint; use `image_base64` or `image_path` when Tandoor cannot
+handle external image URLs.
 
 ### Generic API tools (escape hatch)
 
