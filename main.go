@@ -1,6 +1,8 @@
 // Command tandoor-mcp is a Model Context Protocol server for the Tandoor
-// Recipes REST API. It speaks MCP over stdio and is configured entirely through
-// environment variables (see tandoor.ConfigFromEnv and TANDOOR_IMAGE_DIR).
+// Recipes REST API. By default it speaks MCP over stdio; setting
+// TANDOOR_HTTP_ADDR switches it to the network transport (Streamable HTTP +
+// SSE, with HTTP/2). It is configured entirely through environment variables
+// (see tandoor.ConfigFromEnv, TANDOOR_IMAGE_DIR and the TANDOOR_HTTP_* vars).
 package main
 
 import (
@@ -8,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,7 +36,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := server.New(client, opts).Run(ctx, &mcp.StdioTransport{}); err != nil {
+	srv := server.New(client, opts)
+
+	if addr := strings.TrimSpace(os.Getenv("TANDOOR_HTTP_ADDR")); addr != "" {
+		err = server.ServeHTTP(ctx, srv, server.HTTPOptions{
+			Addr:    addr,
+			Token:   strings.TrimSpace(os.Getenv("TANDOOR_MCP_TOKEN")),
+			TLSCert: strings.TrimSpace(os.Getenv("TANDOOR_TLS_CERT")),
+			TLSKey:  strings.TrimSpace(os.Getenv("TANDOOR_TLS_KEY")),
+		})
+	} else {
+		err = srv.Run(ctx, &mcp.StdioTransport{})
+	}
+	if err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }

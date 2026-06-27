@@ -29,6 +29,29 @@ Configured entirely via environment variables:
 
 The token is sent as `Authorization: Bearer <token>`.
 
+### Transport
+
+By default the server speaks MCP over **stdio** — the right choice for a local,
+per-client launch (`.mcp.json` / `claude_desktop_config.json`). Set
+`TANDOOR_HTTP_ADDR` to serve over the network instead:
+
+| Variable | Required | Description |
+|---|---|---|
+| `TANDOOR_HTTP_ADDR` | no | Listen address (e.g. `:8080`, `127.0.0.1:8080`). When set, serves HTTP instead of stdio. |
+| `TANDOOR_MCP_TOKEN` | when non-loopback | Static bearer token clients must present (`Authorization: Bearer …`). **Required** to bind a non-loopback address — an open endpoint grants full Tandoor access. |
+| `TANDOOR_TLS_CERT` / `TANDOOR_TLS_KEY` | no | PEM cert + key. Both set → HTTPS (HTTP/2 via ALPN). Neither → cleartext with HTTP/2 cleartext (h2c). |
+
+The HTTP transport exposes the modern **Streamable HTTP** transport at `/mcp`
+(request/response plus SSE streaming), the legacy **SSE** transport at `/sse`,
+and an unauthenticated `/healthz`. HTTP/1.1 and HTTP/2 are both served (h2 over
+TLS, h2c in cleartext). The SDK's DNS-rebinding protection is on by default.
+
+```sh
+# network transport with a bearer token, cleartext h2c + http/1.1
+TANDOOR_URL=https://recipes.example.com TANDOOR_TOKEN=xxxx \
+TANDOOR_HTTP_ADDR=:8080 TANDOOR_MCP_TOKEN=$(openssl rand -hex 32) ./tandoor-mcp
+```
+
 ## Run
 
 ```sh

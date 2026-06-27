@@ -28,6 +28,44 @@ func TestNewInsecureLogsWarning(t *testing.T) {
 	}
 }
 
+func TestInsecureTransportKeepsHTTP2AndProxy(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(nil) })
+	c, err := New(Config{BaseURL: "https://x.example", Token: "t", Insecure: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", c.http.Transport)
+	}
+	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify not set on the insecure transport")
+	}
+	// The bug: a bare Transport with a custom TLSClientConfig drops these.
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 is false: HTTP/2 silently disabled in insecure mode")
+	}
+	if tr.Proxy == nil {
+		t.Error("Proxy is nil: HTTPS_PROXY/NO_PROXY ignored in insecure mode")
+	}
+	if tr.IdleConnTimeout == 0 {
+		t.Error("IdleConnTimeout is zero: connection-pool tunings lost in insecure mode")
+	}
+}
+
+func TestSecureTransportUsesDefault(t *testing.T) {
+	c, err := New(Config{BaseURL: "https://x.example", Token: "t"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Secure mode leaves Transport nil so the client uses http.DefaultTransport,
+	// which already negotiates HTTP/2 (ALPN), honors proxy env and pools conns.
+	if c.http.Transport != nil {
+		t.Errorf("secure transport = %T, want nil (http.DefaultTransport)", c.http.Transport)
+	}
+}
+
 func TestAPIErrorTruncatesOnRuneBoundary(t *testing.T) {
 	e := &APIError{StatusCode: 400, Method: "POST", Path: "recipe/", Body: strings.Repeat("é", 5000)}
 	msg := e.Error()

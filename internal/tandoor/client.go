@@ -104,7 +104,13 @@ func New(cfg Config) (*Client, error) {
 	hc := &http.Client{Timeout: timeout}
 	if cfg.Insecure {
 		log.Printf("warning: TLS certificate verification disabled; the API token is exposed to network interception")
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		// Clone DefaultTransport rather than build a bare one, so HTTP/2
+		// (ForceAttemptHTTP2), proxy support (ProxyFromEnvironment) and the
+		// connection-pool/dial timeouts survive. A hand-built Transport with a
+		// custom TLSClientConfig silently disables all three.
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in via TANDOOR_INSECURE_SKIP_VERIFY
+		hc.Transport = tr
 	}
 	return &Client{base: base, token: cfg.Token, http: hc}, nil
 }
