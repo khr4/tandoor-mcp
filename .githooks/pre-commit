@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if ! command -v git-secrets >/dev/null 2>&1; then
+	echo "git-secrets is required before committing: install https://github.com/awslabs/git-secrets" >&2
+	exit 1
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+provider="$repo_root/.githooks/git-secrets-provider"
+
+if ! git config --get-all secrets.providers | grep -F -x -- "$provider" >/dev/null 2>&1; then
+	git secrets --add-provider -- "$provider"
+fi
+
+exec git secrets --pre_commit_hook -- "$@"

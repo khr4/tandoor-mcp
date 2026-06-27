@@ -70,6 +70,24 @@ This codebase is maintained to a strict standard. Hold the line:
 - **Build and test must be green before done.** `make vet test` passes, or it is
   not finished.
 
+## Security and privacy discipline
+
+- **No secrets in the tree.** Do not commit real `TANDOOR_TOKEN`,
+  `TANDOOR_API_TOKEN`, `TANDOOR_MCP_TOKEN`, bearer tokens, `.env` files, MCP
+  client configs, local agent settings, API keys, private keys, cookies, or
+  captured request headers. Documentation examples must use placeholders such as
+  `xxxx` and `example.com`.
+- **No personal Tandoor data.** Do not commit live recipe exports, shopping
+  lists, pantry contents, meal plans, screenshots, logs, or payload captures from
+  a real instance. Tests use synthetic fixtures only.
+- **Use the tracked hook.** Run `make install-hooks` once in a checkout to enable
+  `.githooks/pre-commit`; it requires `git-secrets` and registers this repo's
+  provider patterns. Run `make secret-scan` before committing if hooks are not
+  installed.
+- **Redact before sharing failures.** When copying tool output into issues,
+  commits, or docs, replace hostnames, bearer values, tokens, and user-specific
+  recipe data with placeholders.
+
 ## Adding to the surface
 
 - **New CRUD resource:** add one row to `resources` in `resources.go`. It is
