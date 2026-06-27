@@ -51,7 +51,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest build provenance
-        if: github.event_name != 'workflow_dispatch'
+        # Attestation isn't available for user-owned PRIVATE repos; it activates
+        # automatically once the repo is public.
+        if: github.event_name != 'workflow_dispatch' && github.event.repository.private == false
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
