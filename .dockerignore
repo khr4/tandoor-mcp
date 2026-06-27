@@ -1,0 +1,22 @@
+# Keep the build context (and image) minimal and reproducible.
+.git
+.github
+.githooks
+.golangci.yml
+.gitignore
+.dockerignore
+Dockerfile
+Makefile
+README.md
+AGENTS.md
+CLAUDE.md
+LICENSE
+# Local build artifacts / agent state
+tandoor-mcp
+*.out
+*.test
+.claude
+.agents
+.codex
+.env
+.env.*

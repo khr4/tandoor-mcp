@@ -100,6 +100,35 @@ Register it with an MCP client. Example (`claude_desktop_config.json` /
 }
 ```
 
+## Docker
+
+A static binary on `scratch` — the image is ~10 MB. Build locally:
+
+```sh
+docker build -t tandoor-mcp .
+```
+
+Or pull a published release (built and pushed to GHCR on each tag by
+`.github/workflows/docker.yml`):
+
+```sh
+docker pull ghcr.io/khr4/tandoor-mcp:latest
+```
+
+Most useful with the **HTTP transport** (an stdio server in a container needs
+`-i` and a client that execs into it):
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e TANDOOR_URL=https://recipes.example.com -e TANDOOR_TOKEN=xxxx \
+  -e TANDOOR_HTTP_ADDR=:8080 -e TANDOOR_MCP_TOKEN="$(openssl rand -hex 32)" \
+  ghcr.io/khr4/tandoor-mcp:latest
+```
+
+The container runs as a non-root user and ships only the binary plus CA roots
+(no shell). To read local files for `set_recipe_image`, mount a directory and set
+`TANDOOR_IMAGE_DIR`.
+
 ## Tools
 
 ### Designed tools (use these)
