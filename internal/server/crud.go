@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,10 +13,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// resolve validates a resource name against the catalog and the sensitive denylist.
+// resolve validates a resource name against the catalog and restricted denylist.
 func resolve(name string) (Resource, error) {
 	name = strings.TrimSpace(name)
-	if sensitiveResources[name] {
+	if restrictedResources[name] {
 		return Resource{}, fmt.Errorf("resource %q is restricted and not available through the generic tools", name)
 	}
 	r, ok := lookupResource(name)
@@ -27,7 +28,13 @@ func resolve(name string) (Resource, error) {
 
 // resourceCatalog returns the resource catalog.
 func (h *handlers) resourceCatalog(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	return jsonResult(resources)
+	visible := make([]Resource, 0, len(resources))
+	for _, r := range resources {
+		if !restrictedResources[r.Name] {
+			visible = append(visible, r)
+		}
+	}
+	return jsonResult(visible)
 }
 
 type listInput struct {
@@ -152,10 +159,17 @@ func (h *handlers) genericDelete(ctx context.Context, _ *mcp.CallToolRequest, in
 }
 
 type actionInput struct {
-	Method string            `json:"method" jsonschema:"HTTP method: GET, POST, PUT, PATCH or DELETE"`
-	Path   string            `json:"path" jsonschema:"endpoint path relative to /api/, with a trailing slash (e.g. 'recipe/5/related/', 'fdc-search/', 'switch-active-space/2/')"`
-	Query  map[string]string `json:"query,omitempty" jsonschema:"query-string parameters"`
-	Body   map[string]any    `json:"body,omitempty" jsonschema:"JSON request body for POST/PUT/PATCH"`
+	Method        string            `json:"method" jsonschema:"HTTP method: GET, POST, PUT, PATCH or DELETE"`
+	Path          string            `json:"path" jsonschema:"endpoint path relative to /api/, with a trailing slash (e.g. 'recipe/5/related/', 'fdc-search/', 'switch-active-space/2/')"`
+	Query         map[string]string `json:"query,omitempty" jsonschema:"query-string parameters with one value per key"`
+	QueryParams   []queryParam      `json:"query_params,omitempty" jsonschema:"ordered query-string parameters, allowing repeated names"`
+	Body          map[string]any    `json:"body,omitempty" jsonschema:"JSON object request body for POST/PUT/PATCH"`
+	SendEmptyBody bool              `json:"send_empty_body,omitempty" jsonschema:"send an explicit empty JSON object when body is empty"`
+}
+
+type queryParam struct {
+	Name  string `json:"name" jsonschema:"query parameter name"`
+	Value string `json:"value" jsonschema:"query parameter value"`
 }
 
 // genericAction calls an arbitrary API endpoint.
@@ -166,18 +180,28 @@ func (h *handlers) genericAction(ctx context.Context, _ *mcp.CallToolRequest, in
 	default:
 		return nil, nil, fmt.Errorf("unsupported method %q", in.Method)
 	}
-	if err := validateActionPath(in.Path); err != nil {
+	cleanPath, err := validateActionPath(in.Path)
+	if err != nil {
 		return nil, nil, err
 	}
 	q := url.Values{}
 	for k, v := range in.Query {
 		q.Set(k, v)
 	}
+	for _, p := range in.QueryParams {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			return nil, nil, fmt.Errorf("query parameter name is required")
+		}
+		q.Add(name, p.Value)
+	}
 	var body any
 	if len(in.Body) > 0 {
 		body = in.Body
+	} else if in.SendEmptyBody {
+		body = map[string]any{}
 	}
-	raw, err := h.c.Do(ctx, method, in.Path, q, body)
+	raw, err := h.c.Do(ctx, method, cleanPath, q, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -185,21 +209,35 @@ func (h *handlers) genericAction(ctx context.Context, _ *mcp.CallToolRequest, in
 }
 
 // validateActionPath rejects empty paths, parent-directory traversal, and
-// sensitive resources reached by their first segment.
-func validateActionPath(p string) error {
+// restricted resources reached by their first segment.
+func validateActionPath(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
-		return fmt.Errorf("path is required")
+		return "", fmt.Errorf("path is required")
 	}
-	clean := strings.TrimPrefix(strings.Trim(p, "/"), "api/")
+	unescaped, err := url.PathUnescape(p)
+	if err != nil {
+		return "", fmt.Errorf("invalid path escape: %w", err)
+	}
+	clean := strings.Trim(unescaped, "/")
+	if clean == "api" {
+		clean = ""
+	} else {
+		clean = strings.TrimPrefix(clean, "api/")
+	}
 	segs := strings.Split(clean, "/")
-	if slices.Contains(segs, "..") {
-		return fmt.Errorf("path may not contain '..' segments")
+	if slices.Contains(segs, "") || slices.Contains(segs, ".") || slices.Contains(segs, "..") {
+		return "", fmt.Errorf("path may not contain empty, '.' or '..' segments")
 	}
-	if len(segs) > 0 && sensitiveResources[segs[0]] {
-		return fmt.Errorf("endpoint %q is restricted", segs[0])
+	canonical := strings.TrimPrefix(path.Clean("/"+clean), "/")
+	if canonical == "." || canonical == "" {
+		return "", fmt.Errorf("path is required")
 	}
-	return nil
+	segs = strings.Split(canonical, "/")
+	if len(segs) > 0 && restrictedResources[segs[0]] {
+		return "", fmt.Errorf("endpoint %q is restricted", segs[0])
+	}
+	return canonical + "/", nil
 }
 
 // objectPath builds the detail route for an object, e.g. "recipe/5/".

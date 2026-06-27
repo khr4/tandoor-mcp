@@ -30,7 +30,7 @@ func (h *handlers) resolveTaxonomyID(ctx context.Context, kind, ref string) (int
 	if id, err := strconv.Atoi(ref); err == nil {
 		return id, nil
 	}
-	id, found, err := h.resolveExistingID(ctx, kind, ref)
+	id, found, err := h.resolveUniqueExistingID(ctx, kind, kind, ref)
 	if err != nil {
 		return 0, err
 	}

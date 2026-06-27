@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 func TestNewInsecureLogsWarning(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(io.Discard); log.SetOutput(nil) })
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	if _, err := New(Config{BaseURL: "https://x.example", Token: "t", Insecure: true}); err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestNewInsecureLogsWarning(t *testing.T) {
 
 func TestInsecureTransportKeepsHTTP2AndProxy(t *testing.T) {
 	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(nil) })
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	c, err := New(Config{BaseURL: "https://x.example", Token: "t", Insecure: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -67,6 +68,15 @@ func TestSecureTransportUsesDefault(t *testing.T) {
 	// which already negotiates HTTP/2 (ALPN), honors proxy env and pools conns.
 	if c.http.Transport != nil {
 		t.Errorf("secure transport = %T, want nil (http.DefaultTransport)", c.http.Transport)
+	}
+}
+
+func TestNewRefusesPublicCleartextURL(t *testing.T) {
+	if _, err := New(Config{BaseURL: "http://recipes.example.com", Token: "t"}); err == nil {
+		t.Fatal("expected public http TANDOOR_URL to be refused")
+	}
+	if _, err := New(Config{BaseURL: "http://127.0.0.1:8080", Token: "t"}); err != nil {
+		t.Fatalf("loopback http should remain usable for local tests/dev: %v", err)
 	}
 }
 
@@ -186,7 +196,7 @@ func TestDoPrefixesAPIOnlyWhenAbsent(t *testing.T) {
 }
 
 func TestDoReturnsAPIErrorWithBody(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"name":["This field is required."]}`)
 	})
@@ -207,7 +217,7 @@ func TestDoReturnsAPIErrorWithBody(t *testing.T) {
 }
 
 func TestDoEmptyResponseIsNil(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	raw, err := c.Do(context.Background(), http.MethodDelete, "recipe/5/", nil, nil)

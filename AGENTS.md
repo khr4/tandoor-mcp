@@ -9,5 +9,5 @@ Codex agents must also follow the security rules in `CLAUDE.md`:
   personal Tandoor data into tracked files.
 - Keep examples synthetic (`xxxx`, `example.com`, placeholder paths) and avoid
   committing local agent settings.
-- Before committing, run `make vet test` and `make secret-scan`, or install the
-  tracked git hook with `make install-hooks`.
+- Before committing, run `make verify`, or at minimum `make vet test` plus
+  `make secret-scan`; install the tracked git hook with `make install-hooks`.

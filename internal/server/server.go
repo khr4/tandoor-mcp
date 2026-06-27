@@ -9,13 +9,47 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/khr4/tandoor-mcp/internal/tandoor"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Version is reported to MCP clients during initialization.
-const Version = "0.4.1"
+// Version is reported to MCP clients during initialization. Release builds can
+// override it with -ldflags "-X github.com/khr4/tandoor-mcp/internal/server.Version=vX.Y.Z".
+var Version = "dev"
+
+func reportedVersion() string {
+	if Version != "" && Version != "dev" {
+		return Version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+		var rev string
+		modified := false
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if len(s.Value) >= 12 {
+					rev = s.Value[:12]
+				} else {
+					rev = s.Value
+				}
+			case "vcs.modified":
+				modified = s.Value == "true"
+			}
+		}
+		if rev != "" {
+			if modified {
+				return "dev-" + rev + "-dirty"
+			}
+			return "dev-" + rev
+		}
+	}
+	return "dev"
+}
 
 // Options configures server-layer policy that isn't part of the API client.
 type Options struct {
@@ -36,7 +70,7 @@ func New(c *tandoor.Client, opts Options) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "tandoor-mcp",
 		Title:   "Tandoor Recipes",
-		Version: Version,
+		Version: reportedVersion(),
 	}, nil)
 	h.register(s)
 	return s
@@ -101,11 +135,18 @@ func rawResult(raw json.RawMessage) (*mcp.CallToolResult, any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return textResult("(empty response)")
 	}
+	var structured any
+	if err := json.Unmarshal(raw, &structured); err != nil {
+		return textResult(string(raw)) // not JSON; pass through verbatim
+	}
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "", "  "); err != nil {
 		return textResult(string(raw)) // not JSON; pass through verbatim
 	}
-	return textResult(buf.String())
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: buf.String()}},
+		StructuredContent: structured,
+	}, nil, nil
 }
 
 // jsonResult marshals a Go value to pretty JSON text content.
@@ -114,7 +155,10 @@ func jsonResult(v any) (*mcp.CallToolResult, any, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("encoding result: %w", err)
 	}
-	return textResult(string(b))
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: string(b)}},
+		StructuredContent: v,
+	}, nil, nil
 }
 
 func textResult(text string) (*mcp.CallToolResult, any, error) {

@@ -168,12 +168,12 @@ func TestListRecipeBooksAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listRecipeBooks: %v", err)
 	}
-	var books []bookOut
-	if err := json.Unmarshal([]byte(resultText(t, res)), &books); err != nil {
+	var out listRecipeBooksOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(books) != 2 || books[0].Name != "Favorites" || books[0].Description != "best" {
-		t.Errorf("books = %+v", books)
+	if len(out.Books) != 2 || out.Books[0].Name != "Favorites" || out.Books[0].Description != "best" {
+		t.Errorf("books = %+v", out.Books)
 	}
 }
 
@@ -193,11 +193,11 @@ func TestListRecipeBooksForRecipe(t *testing.T) {
 	if !strings.Contains(query, "recipe=5") {
 		t.Errorf("query = %q, want recipe=5", query)
 	}
-	var books []bookOut
-	if err := json.Unmarshal([]byte(resultText(t, res)), &books); err != nil {
+	var out listRecipeBooksOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(books) != 1 || books[0].Name != "Favorites" {
-		t.Errorf("books = %+v", books)
+	if len(out.Books) != 1 || out.Books[0].Name != "Favorites" {
+		t.Errorf("books = %+v", out.Books)
 	}
 }

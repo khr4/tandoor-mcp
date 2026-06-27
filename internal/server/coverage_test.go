@@ -29,7 +29,7 @@ func TestResolveExistingIDFindsMatchOnLaterPage(t *testing.T) {
 }
 
 func TestResolveRecipeNumericAndName(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":12,"name":"Stew"}]}`)
 	})
 	if id, err := h.resolveRecipe(context.Background(), "42"); err != nil || id != 42 {
@@ -41,7 +41,7 @@ func TestResolveRecipeNumericAndName(t *testing.T) {
 }
 
 func TestResolveRecipeNotFound(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[]}`)
 	})
 	if _, err := h.resolveRecipe(context.Background(), "Ghost"); err == nil {
@@ -88,6 +88,14 @@ func TestGetRecipeScalesAmounts(t *testing.T) {
 	if out.ID != 7 || out.Servings != "4" {
 		t.Errorf("out = %+v, want id 7 servings 4", out)
 	}
+	if len(out.Steps) != 1 || len(out.Steps[0].Ingredients) != 1 || out.Steps[0].Ingredients[0].Amount == nil {
+		t.Errorf("structured steps = %+v, want stored amount 2 for safe editing", out.Steps)
+	} else if got := *out.Steps[0].Ingredients[0].Amount; got != 2 {
+		t.Errorf("structured step amount = %v, want stored amount 2 for safe editing", got)
+	}
+	if len(out.Warnings) == 0 {
+		t.Fatal("expected scaling warning")
+	}
 	if !strings.Contains(out.Markdown, "4 cup flour") {
 		t.Errorf("markdown not scaled: %q", out.Markdown)
 	}
@@ -121,8 +129,46 @@ func TestUpdateRecipeMergesKeywords(t *testing.T) {
 	}
 }
 
+func TestFindRecipesBuildsAllHighValueFilters(t *testing.T) {
+	var recipeQuery string
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/food/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":9,"name":"Tomato"}]}`)
+		case "/api/recipe-book/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":4,"name":"Dinner"}]}`)
+		case "/api/recipe/":
+			recipeQuery = r.URL.RawQuery
+			_, _ = io.WriteString(w, `{"count":0,"results":[]}`)
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	})
+	minRating := 4
+	makeable := true
+	newest := true
+	random := true
+	limit := 7
+	if _, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{
+		Ingredients: []string{"Tomato"},
+		Book:        "Dinner",
+		MinRating:   &minRating,
+		MakeableNow: &makeable,
+		Newest:      &newest,
+		Random:      &random,
+		Limit:       &limit,
+	}); err != nil {
+		t.Fatalf("findRecipes: %v", err)
+	}
+	for _, want := range []string{"foods_and=9", "books_and=4", "rating_gte=4", "makenow=true", "sort_order=-created_at", "random=true", "page_size=7"} {
+		if !strings.Contains(recipeQuery, want) {
+			t.Errorf("query %q missing %q", recipeQuery, want)
+		}
+	}
+}
+
 func TestUpdateRecipeRequiresAField(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {})
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {})
 	if _, _, err := h.updateRecipe(context.Background(), nil, updateRecipeInput{Recipe: "5"}); err == nil {
 		t.Error("expected error when no fields given")
 	}
@@ -205,16 +251,12 @@ func TestLogCookedPostsRating(t *testing.T) {
 }
 
 func TestImportFriendlyErrorOn400(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":true,"msg":"No usable data could be found."}`)
 	})
-	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/none"})
-	if err != nil {
-		t.Fatalf("importRecipeFromURL: %v", err)
-	}
-	if !strings.Contains(resultText(t, res), "No usable data could be found.") {
-		t.Errorf("result = %s", resultText(t, res))
+	if _, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/none"}); err == nil || !strings.Contains(err.Error(), "No usable data could be found.") {
+		t.Fatalf("importRecipeFromURL err = %v, want friendly import error", err)
 	}
 }
 
@@ -238,8 +280,18 @@ func TestImportYouTubeReturnsRecipeID(t *testing.T) {
 	}
 }
 
+func TestImportPreviewErrorsWhenServerAlreadySaved(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"recipe":null,"recipe_id":77,"images":[],"duplicates":[]}`)
+	})
+	save := false
+	if _, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://youtu.be/abc", Save: &save}); err == nil || !strings.Contains(err.Error(), "already imported") {
+		t.Fatalf("importRecipeFromURL err = %v, want already-imported preview error", err)
+	}
+}
+
 func TestImportRejectsNonHTTPURL(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("backend must not be called for a file:// URL")
 	})
 	if _, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "file:///etc/passwd"}); err == nil {
@@ -247,7 +299,22 @@ func TestImportRejectsNonHTTPURL(t *testing.T) {
 	}
 }
 
-func TestImportCollectsDroppedIngredientWarnings(t *testing.T) {
+func TestImportRefusesDroppedIngredientByDefault(t *testing.T) {
+	scrape := `{"recipe":{"name":"Soup","steps":[{"instruction":"x","ingredients":[{"amount":1,"unit":{"name":"l"},"original_text":"1 l of mystery"}]}]},"images":[],"duplicates":[]}`
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/recipe-from-source/":
+			_, _ = io.WriteString(w, scrape)
+		case "/api/recipe/":
+			t.Fatal("lossy import must not save by default")
+		}
+	})
+	if _, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/soup"}); err == nil || !strings.Contains(err.Error(), "would be dropped") {
+		t.Fatalf("importRecipeFromURL err = %v, want dropped-ingredient refusal", err)
+	}
+}
+
+func TestImportAllowsDroppedIngredientWhenExplicit(t *testing.T) {
 	scrape := `{"recipe":{"name":"Soup","steps":[{"instruction":"x","ingredients":[{"amount":1,"unit":{"name":"l"},"original_text":"1 l of mystery"}]}]},"images":[],"duplicates":[]}`
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -257,7 +324,8 @@ func TestImportCollectsDroppedIngredientWarnings(t *testing.T) {
 			_, _ = io.WriteString(w, `{"id":3,"name":"Soup"}`)
 		}
 	})
-	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/soup"})
+	allow := true
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/soup", AllowPartial: &allow})
 	if err != nil {
 		t.Fatalf("importRecipeFromURL: %v", err)
 	}
@@ -288,9 +356,12 @@ func TestSetRecipeImageURL(t *testing.T) {
 }
 
 func TestSetRecipeImageRejectsBadScheme(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {})
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {})
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "ftp://x/y"}); err == nil {
 		t.Error("expected scheme rejection")
+	}
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "http://127.0.0.1/x.png"}); err == nil {
+		t.Error("expected loopback SSRF rejection")
 	}
 }
 
@@ -305,7 +376,7 @@ func TestSetRecipeImagePathGating(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
 
 	// imageDir unset → local path refused.
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: inside}); err == nil {
@@ -327,7 +398,7 @@ func TestGetMealPlanUsesDateFilterAndEndDate(t *testing.T) {
 	var query string
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.RawQuery
-		_, _ = io.WriteString(w, `[{"id":3,"from_date":"2026-07-01T00:00:00","to_date":"2026-07-03T00:00:00","meal_type":{"name":"Dinner"},"recipe":{"id":5,"name":"Stew"}}]`)
+		_, _ = io.WriteString(w, `[{"id":3,"from_date":"2026-07-01T00:00:00","to_date":"2026-07-03T00:00:00","meal_type":{"name":"Dinner"},"recipe":{"id":5,"name":"Stew"},"note":"prep ahead"}]`)
 	})
 	res, _, err := h.getMealPlan(context.Background(), nil, getMealPlanInput{From: "2026-07-01", To: "2026-07-31"})
 	if err != nil {
@@ -340,7 +411,7 @@ func TestGetMealPlanUsesDateFilterAndEndDate(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(t, res)), &cards); err != nil {
 		t.Fatal(err)
 	}
-	if len(cards) != 1 || cards[0].EndDate == "" || cards[0].Recipe != "Stew" {
+	if len(cards) != 1 || cards[0].EndDate == "" || cards[0].Recipe != "Stew" || cards[0].Note != "prep ahead" {
 		t.Errorf("cards = %+v", cards)
 	}
 }
@@ -433,7 +504,7 @@ func TestClearShoppingListAggregatesErrors(t *testing.T) {
 // ---- pantry / taxonomy ----
 
 func TestGetPantryFiltersOnHand(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":1,"name":"Milk","food_onhand":true},{"id":2,"name":"Flour","food_onhand":false}]}`)
 	})
 	res, _, err := h.getPantry(context.Background(), nil, struct{}{})
@@ -505,7 +576,7 @@ func TestImportPreviewRendersSteps(t *testing.T) {
 		_, _ = io.WriteString(w, scrape)
 	})
 	save := false
-	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/soup", Save: &save})
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/soup", Save: &save})
 	if err != nil {
 		t.Fatalf("importRecipeFromURL: %v", err)
 	}
@@ -544,7 +615,7 @@ func TestGetRecipeStepsRoundTripToSetSteps(t *testing.T) {
 	if err := json.Unmarshal(b, &in); err != nil {
 		t.Fatalf("round-trip decode into set_recipe_steps input: %v", err)
 	}
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("no parser call expected for already-structured ingredients")
 	})
 	built, err := h.buildSteps(context.Background(), in)
@@ -584,7 +655,7 @@ func TestCardKeywordFallsBackToLabel(t *testing.T) {
 // ---- v0.2.1 hardening ----
 
 func TestResolveRecipeAmbiguousNameErrors(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":3,"name":"Soup"},{"id":9,"name":"Soup"}]}`)
 	})
 	if _, err := h.resolveRecipe(context.Background(), "Soup"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
@@ -665,32 +736,51 @@ func TestShoppingEntriesPaginates(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":2,"checked":false}]}`)
 	})
-	entries, err := h.shoppingEntries(context.Background())
+	entries, truncated, err := h.shoppingEntries(context.Background())
 	if err != nil {
 		t.Fatalf("shoppingEntries: %v", err)
 	}
-	if len(entries) != 2 || reqs != 2 {
-		t.Errorf("entries=%d reqs=%d, want 2 and 2", len(entries), reqs)
+	if len(entries) != 2 || reqs != 2 || truncated {
+		t.Errorf("entries=%d reqs=%d truncated=%v, want 2, 2, false", len(entries), reqs, truncated)
 	}
 }
 
 func TestShoppingEntriesStopsAtPageCap(t *testing.T) {
 	var reqs int
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		reqs++
 		_, _ = io.WriteString(w, `{"next":"always","results":[{"id":1}]}`) // next never clears
 	})
-	if _, err := h.shoppingEntries(context.Background()); err != nil {
+	if _, truncated, err := h.shoppingEntries(context.Background()); err != nil {
 		t.Fatalf("shoppingEntries: %v", err)
+	} else if !truncated {
+		t.Fatal("expected truncation after page cap")
 	}
 	if reqs != shoppingScanPages {
 		t.Errorf("reqs = %d, want capped at %d", reqs, shoppingScanPages)
 	}
 }
 
+func TestClearShoppingListRefusesTruncatedScan(t *testing.T) {
+	deleted := false
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleted = true
+			t.Fatal("clear must not delete after a truncated scan")
+		}
+		_, _ = io.WriteString(w, `{"next":"always","results":[{"id":1,"checked":true}]}`)
+	})
+	if _, _, err := h.clearShoppingList(context.Background(), nil, clearShoppingInput{}); err == nil {
+		t.Fatal("expected truncated clear to fail")
+	}
+	if deleted {
+		t.Fatal("delete was attempted after truncated scan")
+	}
+}
+
 func TestSafeImagePathUniformErrorNoOracle(t *testing.T) {
 	dir := t.TempDir()
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {})
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {})
 	h.imageDir = dir
 
 	_, errMissing := h.safeImagePath(filepath.Join(dir, "nope.png"))
@@ -723,10 +813,12 @@ func TestSetRecipeImageRejectsOversize(t *testing.T) {
 	if err := f.Truncate(maxImageBytes + 1); err != nil { // sparse file, no real bytes written
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	posted := false
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		posted = true
 		_, _ = io.WriteString(w, `{}`)
 	})
@@ -763,6 +855,15 @@ func TestMergeTaxonomyResolvesNames(t *testing.T) {
 	}
 }
 
+func TestMergeTaxonomyRejectsAmbiguousName(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"next":null,"results":[{"id":3,"name":"Old"},{"id":4,"name":"old"}]}`)
+	})
+	if _, _, err := h.mergeTaxonomy(context.Background(), nil, mergeTaxonomyInput{Kind: "keyword", Source: "Old", Target: "Target"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("mergeTaxonomy err = %v, want ambiguity", err)
+	}
+}
+
 // ---- get_recipe nutrition ----
 
 func TestGetRecipeSurfacesNutrition(t *testing.T) {
@@ -795,7 +896,7 @@ func TestGetRecipeSurfacesNutrition(t *testing.T) {
 }
 
 func TestGetRecipeOmitsAbsentNutrition(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":8,"name":"Plain","servings":1,"steps":[]}`)
 	})
 	res, _, err := h.getRecipe(context.Background(), nil, getRecipeInput{Recipe: "8"})
@@ -815,7 +916,7 @@ func TestGetRecipeOmitsAbsentNutrition(t *testing.T) {
 }
 
 func TestGetRecipeScalesAmountsButNotNutrition(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":7,"name":"Soup","servings":2,
 			"nutrition":{"calories":"250"},
 			"steps":[{"instruction":"boil","ingredients":[{"amount":2,"food":{"name":"water"},"unit":{"name":"cup"},"no_amount":false}]}]}`)
@@ -833,8 +934,11 @@ func TestGetRecipeScalesAmountsButNotNutrition(t *testing.T) {
 		t.Errorf("servings = %q, want 4", out.Servings)
 	}
 	amt := out.Steps[0].Ingredients[0].Amount
-	if amt == nil || *amt != 4 {
-		t.Errorf("ingredient amount = %v, want 4 (scaled 2->4)", amt)
+	if amt == nil || *amt != 2 {
+		t.Errorf("ingredient amount = %v, want stored amount 2 in structured steps", amt)
+	}
+	if !strings.Contains(out.Markdown, "4 cup water") {
+		t.Errorf("markdown = %q, want scaled amount 4", out.Markdown)
 	}
 	if out.Nutrition == nil || out.Nutrition.Calories != "250" {
 		t.Errorf("nutrition = %+v, want calories unchanged at 250 (not scaled)", out.Nutrition)
@@ -885,7 +989,7 @@ func TestCheckShoppingItemsUncheck(t *testing.T) {
 }
 
 func TestCheckShoppingItemsRequiresIDs(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("must not call backend with no ids")
 	})
 	if _, _, err := h.checkShoppingItems(context.Background(), nil, checkShoppingInput{}); err == nil {

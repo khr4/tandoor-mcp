@@ -33,6 +33,12 @@ type bookOut struct {
 	Description string `json:"description,omitempty"`
 }
 
+type listRecipeBooksOutput struct {
+	Books     []bookOut `json:"books"`
+	Truncated bool      `json:"truncated,omitempty"`
+	Note      string    `json:"note,omitempty"`
+}
+
 // ---- add_recipe_to_book ----
 
 type addRecipeToBookInput struct {
@@ -52,7 +58,7 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 	if book == "" {
 		return nil, nil, fmt.Errorf("book is required")
 	}
-	bookID, found, err := h.resolveExistingID(ctx, "recipe-book", book)
+	bookID, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", book)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -163,7 +169,7 @@ func (h *handlers) listRecipeBooks(ctx context.Context, _ *mcp.CallToolRequest, 
 		for _, e := range entries {
 			books = append(books, bookOut{ID: e.BookContent.ID, Name: e.BookContent.Name, Description: e.BookContent.Description})
 		}
-		return jsonResult(books)
+		return jsonResult(listRecipeBooksOutput{Books: books})
 	}
 
 	q := url.Values{}
@@ -172,13 +178,20 @@ func (h *handlers) listRecipeBooks(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
+	var env listEnvelope
+	paginated := json.Unmarshal(raw, &env) == nil && len(env.Results) > 0
 	var all []apiBook
 	if err := decodeList(raw, &all); err != nil {
 		return nil, nil, fmt.Errorf("decoding recipe books: %w", err)
 	}
 	books := make([]bookOut, 0, len(all))
 	for _, b := range all {
-		books = append(books, bookOut{ID: b.ID, Name: b.Name, Description: b.Description})
+		books = append(books, bookOut(b))
 	}
-	return jsonResult(books)
+	out := listRecipeBooksOutput{Books: books}
+	if paginated && env.Next != nil && *env.Next != "" {
+		out.Truncated = true
+		out.Note = "returned the first page of recipe books; use tandoor_list for explicit pagination"
+	}
+	return jsonResult(out)
 }

@@ -208,7 +208,7 @@ func TestCreateRecipeParsesLinesAndPostsExplicitQuantities(t *testing.T) {
 
 // ---- find_recipes (name resolution + warnings) ----
 
-func TestFindRecipesResolvesKeywordsAndWarns(t *testing.T) {
+func TestFindRecipesResolvesKeywords(t *testing.T) {
 	var recipeQuery string
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -228,7 +228,7 @@ func TestFindRecipesResolvesKeywordsAndWarns(t *testing.T) {
 
 	res, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{
 		Text:     "tofu",
-		Keywords: []string{"Vegan", "Nonexistent"},
+		Keywords: []string{"Vegan"},
 	})
 	if err != nil {
 		t.Fatalf("findRecipes: %v", err)
@@ -246,8 +246,17 @@ func TestFindRecipesResolvesKeywordsAndWarns(t *testing.T) {
 	if len(out.Recipes) != 1 || out.Recipes[0].Name != "Tofu Stir Fry" {
 		t.Errorf("recipes = %+v", out.Recipes)
 	}
-	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "Nonexistent") {
-		t.Errorf("warnings = %v, want one mentioning Nonexistent", out.Warnings)
+}
+
+func TestFindRecipesFailsOnUnresolvedFilter(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/recipe/" {
+			t.Fatal("recipe search must not run after an unresolved required filter")
+		}
+		_, _ = io.WriteString(w, `{"results":[]}`)
+	})
+	if _, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{Keywords: []string{"Nonexistent"}}); err == nil {
+		t.Fatal("expected unresolved keyword to fail closed")
 	}
 }
 
@@ -267,11 +276,11 @@ func TestImportSavesScrapedRecipe(t *testing.T) {
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
 	})
-	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x/soup"})
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/soup"})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	if at(t, recipeBody, "name") != "Soup" || at(t, recipeBody, "source_url") != "http://x/soup" {
+	if at(t, recipeBody, "name") != "Soup" || at(t, recipeBody, "source_url") != "https://recipes.example.com/soup" {
 		t.Errorf("recipe body name/source wrong: %v", recipeBody)
 	}
 	ing := idx(t, at(t, idx(t, at(t, recipeBody, "steps"), 0), "ingredients"), 0)
@@ -292,7 +301,7 @@ func TestImportPreviewDoesNotSave(t *testing.T) {
 		_, _ = io.WriteString(w, `{"recipe":{"name":"Soup","steps":[]},"images":[],"duplicates":[]}`)
 	})
 	save := false
-	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "http://x", Save: &save})
+	res, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "https://recipes.example.com/source", Save: &save})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -353,19 +362,19 @@ func TestAddToShoppingListBody(t *testing.T) {
 }
 
 func TestGetShoppingListFiltersChecked(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[{"id":1,"amount":"2","unit":{"name":"l"},"food":{"name":"milk"},"checked":false},{"id":2,"amount":"1","food":{"name":"bread"},"checked":true}]`)
 	})
 	res, _, err := h.getShoppingList(context.Background(), nil, getShoppingInput{})
 	if err != nil {
 		t.Fatalf("getShoppingList: %v", err)
 	}
-	var items []shoppingItem
-	if err := json.Unmarshal([]byte(resultText(t, res)), &items); err != nil {
+	var out shoppingListOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(items) != 1 || items[0].Item != "2 l milk" {
-		t.Errorf("items = %+v, want one '2 l milk'", items)
+	if len(out.Items) != 1 || out.Items[0].Item != "2 l milk" || out.Items[0].Food != "milk" || out.Items[0].Unit != "l" {
+		t.Errorf("items = %+v, want one structured '2 l milk'", out.Items)
 	}
 }
 
@@ -399,5 +408,18 @@ func TestSetFoodOnHandGetOrCreatesAndPatches(t *testing.T) {
 	}
 	if at(t, patchBody, "food_onhand") != true {
 		t.Errorf("food_onhand = %v, want true", at(t, patchBody, "food_onhand"))
+	}
+}
+
+func TestSetFoodOnHandClearDoesNotCreate(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Fatal("clearing on-hand state must not create a food")
+		}
+		_, _ = io.WriteString(w, `{"next":null,"results":[]}`)
+	})
+	onHand := false
+	if _, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "Typo", OnHand: &onHand}); err == nil {
+		t.Fatal("expected clearing a missing food to fail")
 	}
 }

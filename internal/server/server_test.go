@@ -80,6 +80,9 @@ func TestGenericListBuildsPathAndQuery(t *testing.T) {
 	if !strings.Contains(resultText(t, res), `"count": 1`) {
 		t.Errorf("result not pretty-printed: %s", resultText(t, res))
 	}
+	if res.StructuredContent == nil {
+		t.Fatal("generic JSON result should include structuredContent")
+	}
 }
 
 func TestUnknownResourceErrors(t *testing.T) {
@@ -155,9 +158,9 @@ func TestGenericDeleteConfirms(t *testing.T) {
 	}
 }
 
-func TestGenericToolsDenySensitiveResources(t *testing.T) {
+func TestGenericToolsDenyRestrictedResources(t *testing.T) {
 	h := newHandlers(t, &recorder{reply: `{"token":"secret"}`})
-	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config", "invite-link"} {
+	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config", "invite-link", "user", "space", "user-file", "view-log"} {
 		if _, _, err := h.genericGet(context.Background(), nil, getInput{Resource: res, ID: "1"}); err == nil {
 			t.Errorf("genericGet(%s) should be denied", res)
 		}
@@ -176,7 +179,16 @@ func TestActionValidatesMethodAndPath(t *testing.T) {
 		t.Error("expected error for path traversal")
 	}
 	if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: "access-token/"}); err == nil {
-		t.Error("expected error for sensitive endpoint")
+		t.Error("expected error for restricted endpoint")
+	}
+	if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: "api"}); err == nil {
+		t.Error("expected error for bare API root")
+	}
+	if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: "api//access-token/"}); err == nil {
+		t.Error("expected error for duplicate-slash restricted endpoint bypass")
+	}
+	if _, _, err := h.genericAction(context.Background(), nil, actionInput{Method: "GET", Path: "api/./access-token/"}); err == nil {
+		t.Error("expected error for dot-segment restricted endpoint bypass")
 	}
 }
 
@@ -187,6 +199,10 @@ func TestActionCalls(t *testing.T) {
 		Method: "get",
 		Path:   "switch-active-space/2/",
 		Query:  map[string]string{"verbose": "1"},
+		QueryParams: []queryParam{
+			{Name: "tag", Value: "a"},
+			{Name: "tag", Value: "b"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("genericAction: %v", err)
@@ -194,7 +210,7 @@ func TestActionCalls(t *testing.T) {
 	if rec.method != http.MethodGet || rec.path != "/api/switch-active-space/2/" {
 		t.Errorf("got %s %s", rec.method, rec.path)
 	}
-	if !strings.Contains(rec.query, "verbose=1") {
+	if !strings.Contains(rec.query, "verbose=1") || strings.Count(rec.query, "tag=") != 2 {
 		t.Errorf("query = %q", rec.query)
 	}
 	if !strings.Contains(resultText(t, res), `"id": 1`) {
@@ -246,6 +262,11 @@ func TestResourcesCatalog(t *testing.T) {
 	for _, want := range []string{`"recipe"`, `"shopping-list-entry"`, `"meal-plan"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("catalog missing %s", want)
+		}
+	}
+	for _, denied := range []string{`"access-token"`, `"user-file"`, `"view-log"`} {
+		if strings.Contains(text, denied) {
+			t.Errorf("catalog exposes restricted resource %s: %s", denied, text)
 		}
 	}
 }

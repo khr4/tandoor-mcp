@@ -37,6 +37,11 @@ type HTTPOptions struct {
 	// otherwise the server is cleartext with HTTP/2 cleartext (h2c) support.
 	TLSCert string
 	TLSKey  string
+	// AllowCleartextNonLoopback permits cleartext on a non-loopback bind. This
+	// is unsafe unless a same-network TLS tunnel or proxy is protecting the link.
+	AllowCleartextNonLoopback bool
+	// ReadyCheck, when set, backs /readyz with a real upstream Tandoor check.
+	ReadyCheck func(context.Context) error
 }
 
 // newHTTPHandler builds the MCP HTTP handler: the modern Streamable HTTP
@@ -47,7 +52,7 @@ type HTTPOptions struct {
 // SAFETY: with token == "" this handler is unauthenticated. The refusal to bind
 // a non-loopback address without a token lives in Serve — do not mount this
 // handler on a public listener by any other path.
-func newHTTPHandler(srv *mcp.Server, token string) http.Handler {
+func newHTTPHandler(srv *mcp.Server, token string, readyCheck func(context.Context) error) http.Handler {
 	getServer := func(*http.Request) *mcp.Server { return srv }
 
 	// When a bearer token gates the endpoint, the token — not the request's Host
@@ -66,6 +71,20 @@ func newHTTPHandler(srv *mcp.Server, token string) http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if readyCheck == nil {
+			http.Error(w, `{"status":"not_configured"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := readyCheck(ctx); err != nil {
+			http.Error(w, fmt.Sprintf(`{"status":"unready","error":%q}`, err.Error()), http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 	return mux
 }
@@ -111,11 +130,17 @@ func Serve(ctx context.Context, srv *mcp.Server, opts HTTPOptions) error {
 	if opts.Token == "" && !isLoopback(opts.Addr) {
 		return fmt.Errorf("refusing to serve MCP on non-loopback address %q without a token: set TANDOOR_MCP_TOKEN (an open endpoint grants full Tandoor access)", opts.Addr)
 	}
+	if opts.Token != "" && !isLoopback(opts.Addr) && len(opts.Token) < 24 {
+		return fmt.Errorf("refusing to serve MCP on non-loopback address %q with a short token: use at least 24 characters", opts.Addr)
+	}
 	if opts.Token == "" {
 		log.Printf("warning: serving MCP on %s without authentication (loopback only); set TANDOOR_MCP_TOKEN to require a bearer token", opts.Addr)
 	}
+	if opts.TLSCert == "" && !isLoopback(opts.Addr) && !opts.AllowCleartextNonLoopback {
+		return fmt.Errorf("refusing cleartext MCP on non-loopback address %q: bind loopback behind TLS, set TANDOOR_TLS_CERT/KEY, or set TANDOOR_HTTP_ALLOW_CLEAR=true only behind another encrypted transport", opts.Addr)
+	}
 	if opts.TLSCert == "" && !isLoopback(opts.Addr) {
-		log.Printf("warning: serving cleartext on non-loopback %s; the bearer token and all data are exposed unless a TLS-terminating proxy fronts it — prefer a loopback bind behind a same-host proxy, or set TANDOOR_TLS_CERT/KEY", opts.Addr)
+		log.Printf("warning: serving cleartext on non-loopback %s because TANDOOR_HTTP_ALLOW_CLEAR=true; the bearer token and all data are exposed unless another encrypted transport protects it", opts.Addr)
 	}
 	ln, err := net.Listen("tcp", opts.Addr)
 	if err != nil {
@@ -142,7 +167,7 @@ func serveListener(ctx context.Context, srv *mcp.Server, opts HTTPOptions, ln ne
 	}
 
 	hs := &http.Server{
-		Handler:   newHTTPHandler(srv, opts.Token),
+		Handler:   newHTTPHandler(srv, opts.Token, opts.ReadyCheck),
 		Protocols: protocols,
 		// Bound header read and idle keep-alive; deliberately no Read/Write
 		// timeout, which would sever long-lived SSE streams. IdleTimeout applies
@@ -155,7 +180,7 @@ func serveListener(ctx context.Context, srv *mcp.Server, opts HTTPOptions, ln ne
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
-	log.Printf("MCP HTTP transport on %s (tls=%v, auth=%v); endpoints: /mcp (streamable), /sse (legacy), /healthz",
+	log.Printf("MCP HTTP transport on %s (tls=%v, auth=%v); endpoints: /mcp (streamable), /sse (legacy), /healthz, /readyz",
 		ln.Addr(), useTLS, opts.Token != "")
 
 	errc := make(chan error, 1)

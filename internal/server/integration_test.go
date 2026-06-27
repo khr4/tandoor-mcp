@@ -57,13 +57,23 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 	for _, tl := range tools.Tools {
 		names[tl.Name] = true
 	}
-	for _, want := range []string{
+	wantTools := []string{
 		"tandoor_resources", "tandoor_list", "tandoor_action",
-		"find_recipes", "create_recipe", "import_recipe_from_url", "delete_recipe",
-		"plan_meal", "get_shopping_list", "set_food_on_hand", "merge_taxonomy",
+		"tandoor_get", "tandoor_create", "tandoor_update", "tandoor_delete",
+		"find_recipes", "get_recipe", "create_recipe", "import_recipe_from_url",
+		"update_recipe", "set_recipe_steps", "delete_recipe", "set_recipe_image",
+		"find_related_recipes", "log_cooked",
 		"add_recipe_to_book", "remove_recipe_from_book", "list_recipe_books",
-		"check_shopping_items",
-	} {
+		"plan_meal", "get_meal_plan", "remove_meal_plan_entry",
+		"get_shopping_list", "add_to_shopping_list", "add_recipe_to_shopping",
+		"update_shopping_item", "clear_shopping_list", "check_shopping_items",
+		"get_pantry", "set_food_on_hand",
+		"list_taxonomy", "merge_taxonomy", "move_taxonomy",
+	}
+	if len(names) != len(wantTools) {
+		t.Errorf("registered tool count = %d, want %d (%v)", len(names), len(wantTools), names)
+	}
+	for _, want := range wantTools {
 		if !names[want] {
 			t.Errorf("tool %q not registered (have %d tools)", want, len(tools.Tools))
 		}
@@ -92,7 +102,7 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 
 func TestEndToEndInputValidation(t *testing.T) {
 	ctx := context.Background()
-	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+	cs := connect(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Errorf("backend should not be called when input is invalid")
 	})
 	// tandoor_get requires resource and id; omit both.

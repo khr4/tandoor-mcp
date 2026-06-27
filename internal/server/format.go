@@ -65,6 +65,16 @@ func scaleAmounts(r *apiRecipe, factor float64) {
 	}
 }
 
+func cloneRecipe(r apiRecipe) apiRecipe {
+	r.Keywords = append([]apiKeyword(nil), r.Keywords...)
+	r.Properties = append([]apiProperty(nil), r.Properties...)
+	r.Steps = append([]apiStep(nil), r.Steps...)
+	for i := range r.Steps {
+		r.Steps[i].Ingredients = append([]apiIngredient(nil), r.Steps[i].Ingredients...)
+	}
+	return r
+}
+
 type apiUnit struct {
 	ID         int    `json:"id"`
 	Name       string `json:"name"`
@@ -162,6 +172,7 @@ type recipeCard struct {
 // shapes (ingredientInput / stepInput) so get_recipe's structured steps can be
 // edited and fed straight back without parsing the Markdown.
 type ingredientOut struct {
+	Text     string   `json:"text,omitempty"`
 	Amount   *float64 `json:"amount,omitempty"`
 	Unit     string   `json:"unit,omitempty"`
 	Food     string   `json:"food,omitempty"`
@@ -180,6 +191,7 @@ func toIngredientOut(ing apiIngredient) ingredientOut {
 	if ing.IsHeader {
 		return o // a header carries its text in note
 	}
+	o.Text = strings.TrimSpace(ing.OriginalText)
 	if !ing.NoAmount && ing.Amount.Set {
 		v := ing.Amount.Value
 		o.Amount = &v

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -93,6 +94,15 @@ func New(cfg Config) (*Client, error) {
 	}
 	if base.Scheme == "" || base.Host == "" {
 		return nil, fmt.Errorf("invalid TANDOOR_URL %q: need a scheme and host", cfg.BaseURL)
+	}
+	if base.Scheme != "https" && base.Scheme != "http" {
+		return nil, fmt.Errorf("invalid TANDOOR_URL %q: scheme must be http or https", cfg.BaseURL)
+	}
+	if base.Scheme == "http" {
+		if !isLocalHTTPHost(base.Hostname()) {
+			return nil, fmt.Errorf("refusing cleartext TANDOOR_URL %q for a non-local host: use https", cfg.BaseURL)
+		}
+		log.Printf("warning: using cleartext TANDOOR_URL %s; the API token is visible on that connection", cfg.BaseURL)
 	}
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("token is required")
@@ -199,7 +209,7 @@ func (c *Client) send(req *http.Request, method, path string) (json.RawMessage, 
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s %s response: %w", method, path, err)
@@ -237,4 +247,16 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func isLocalHTTPHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }

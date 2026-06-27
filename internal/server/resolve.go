@@ -98,6 +98,24 @@ func (h *handlers) resolveExistingID(ctx context.Context, resourcePath, name str
 	return 0, false, nil
 }
 
+// resolveUniqueExistingID finds one exact match and errors if there are multiple
+// exact matches. Destructive and placement operations use this instead of a
+// silent first-match pick.
+func (h *handlers) resolveUniqueExistingID(ctx context.Context, resourcePath, kind, name string) (id int, found bool, err error) {
+	ids, err := h.exactMatchIDs(ctx, resourcePath, name)
+	if err != nil {
+		return 0, false, fmt.Errorf("could not look up %s %q: %w", kind, name, err)
+	}
+	switch len(ids) {
+	case 0:
+		return 0, false, nil
+	case 1:
+		return ids[0], true, nil
+	default:
+		return 0, false, fmt.Errorf("%s name %q is ambiguous; it matches ids %v — pass a specific id", kind, name, ids)
+	}
+}
+
 // getOrCreateID returns the id of an object with the given name, relying on
 // Tandoor's server-side get-or-create-by-exact-name (POST {name}). If an
 // instance instead rejects a duplicate name with 400/409, it falls back to a
@@ -114,8 +132,10 @@ func (h *handlers) getOrCreateID(ctx context.Context, resourcePath, name string)
 	if err != nil {
 		var apiErr *tandoor.APIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusBadRequest || apiErr.StatusCode == http.StatusConflict) {
-			if id, found, e := h.resolveExistingID(ctx, resourcePath, name); e == nil && found {
+			if id, found, e := h.resolveUniqueExistingID(ctx, resourcePath, resourcePath, name); e == nil && found {
 				return id, nil
+			} else if e != nil {
+				return 0, e
 			}
 		}
 		return 0, err
@@ -127,22 +147,20 @@ func (h *handlers) getOrCreateID(ctx context.Context, resourcePath, name string)
 	return created.ID, nil
 }
 
-// resolveExistingIDs maps names to ids for filtering. A name that does not
-// resolve — whether genuinely absent or because the lookup errored — becomes a
-// warning rather than failing the whole operation.
-func (h *handlers) resolveExistingIDs(ctx context.Context, resourcePath, kind string, names []string) (ids []int, warnings []string) {
+func (h *handlers) resolveRequiredIDs(ctx context.Context, resourcePath, kind string, names []string) ([]int, error) {
+	ids := make([]int, 0, len(names))
 	for _, n := range names {
-		id, found, err := h.resolveExistingID(ctx, resourcePath, n)
+		id, found, err := h.resolveUniqueExistingID(ctx, resourcePath, kind, n)
 		switch {
 		case err != nil:
-			warnings = append(warnings, fmt.Sprintf("could not look up %s %q: %v; ignored as a filter", kind, n, err))
-		case found:
-			ids = append(ids, id)
+			return nil, err
+		case !found:
+			return nil, fmt.Errorf("%s %q not found", kind, n)
 		default:
-			warnings = append(warnings, fmt.Sprintf("%s %q not found; ignored as a filter", kind, n))
+			ids = append(ids, id)
 		}
 	}
-	return ids, warnings
+	return ids, nil
 }
 
 // resolveRecipe resolves a recipe reference that is either a numeric id or a

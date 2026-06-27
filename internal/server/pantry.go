@@ -79,11 +79,24 @@ func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 	if strings.TrimSpace(in.Food) == "" {
 		return nil, nil, fmt.Errorf("food is required")
 	}
-	id, err := h.getOrCreateID(ctx, "food", in.Food)
-	if err != nil {
-		return nil, nil, err
-	}
 	onHand := in.OnHand == nil || *in.OnHand
+	var id int
+	if onHand {
+		var err error
+		id, err = h.getOrCreateID(ctx, "food", in.Food)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		foundID, found, err := h.resolveUniqueExistingID(ctx, "food", "food", in.Food)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			return nil, nil, fmt.Errorf("food %q not found; refusing to create a food while clearing on-hand state", in.Food)
+		}
+		id = foundID
+	}
 	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("food/%d/", id), nil, map[string]any{"food_onhand": onHand}); err != nil {
 		return nil, nil, err
 	}

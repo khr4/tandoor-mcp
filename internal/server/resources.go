@@ -75,15 +75,29 @@ var resourceByName = func() map[string]Resource {
 	return m
 }()
 
-// sensitiveResources hold credentials or other secrets and must not be reachable
-// through the generic tools, which return response bodies verbatim to the model.
-var sensitiveResources = map[string]bool{
-	"storage":          true,
-	"ai-provider":      true,
-	"ai-log":           true,
-	"access-token":     true,
-	"connector-config": true,
-	"invite-link":      true, // carries a bearer token to join the space
+// restrictedResources hold credentials, administrative surfaces or raw PII-ish
+// logs and must not be reachable through the generic tools, which return
+// response bodies verbatim to the model.
+var restrictedResources = map[string]bool{
+	"storage":            true,
+	"sync":               true,
+	"sync-log":           true,
+	"ai-provider":        true,
+	"ai-log":             true,
+	"access-token":       true,
+	"connector-config":   true,
+	"invite-link":        true, // carries a bearer token to join the space
+	"user":               true,
+	"user-preference":    true,
+	"user-space":         true,
+	"space":              true,
+	"household":          true,
+	"group":              true,
+	"user-file":          true,
+	"view-log":           true,
+	"import-log":         true,
+	"export-log":         true,
+	"bookmarklet-import": true,
 }
 
 func lookupResource(name string) (Resource, bool) {

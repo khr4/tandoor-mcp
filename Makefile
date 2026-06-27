@@ -1,7 +1,7 @@
 BINARY := tandoor-mcp
 GIT_SECRETS_PROVIDER := $(CURDIR)/.githooks/git-secrets-provider
 
-.PHONY: build test vet lint tidy run clean install-hooks secret-scan
+.PHONY: build test vet lint tidy run clean install-hooks secret-scan verify
 
 build:
 	go build -o $(BINARY) .
@@ -13,7 +13,9 @@ vet:
 	go vet ./...
 
 lint:
-	golangci-lint run
+	golangci-lint run ./...
+
+verify: vet test lint secret-scan
 
 install-hooks:
 	@command -v git-secrets >/dev/null 2>&1 || { echo "git-secrets is required: install https://github.com/awslabs/git-secrets"; exit 1; }

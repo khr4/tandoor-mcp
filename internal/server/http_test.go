@@ -61,8 +61,15 @@ func mcpServer(t *testing.T, backend http.HandlerFunc) *mcp.Server {
 	return New(c, Options{})
 }
 
+func closeBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("closing response body: %v", err)
+	}
+}
+
 func TestHTTPAuthGate(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret", nil))
 	t.Cleanup(front.Close)
 
 	// /healthz is unauthenticated.
@@ -70,7 +77,7 @@ func TestHTTPAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz status = %d, want 200", resp.StatusCode)
 	}
@@ -80,7 +87,7 @@ func TestHTTPAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	noauth.Body.Close()
+	closeBody(t, noauth)
 	if noauth.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no-auth /mcp = %d, want 401", noauth.StatusCode)
 	}
@@ -96,9 +103,38 @@ func TestHTTPAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad.Body.Close()
+	closeBody(t, bad)
 	if bad.StatusCode != http.StatusUnauthorized {
 		t.Errorf("wrong-token /mcp = %d, want 401", bad.StatusCode)
+	}
+}
+
+func TestReadyzUsesRealCheck(t *testing.T) {
+	var called bool
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret", func(context.Context) error {
+		called = true
+		return nil
+	}))
+	t.Cleanup(front.Close)
+	resp, err := http.Get(front.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK || !called {
+		t.Errorf("readyz status=%d called=%v, want 200 and called", resp.StatusCode, called)
+	}
+
+	front.Config.Handler = newHTTPHandler(mcpServer(t, nil), "secret", func(context.Context) error {
+		return io.ErrUnexpectedEOF
+	})
+	resp, err = http.Get(front.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("unready status = %d, want 503", resp.StatusCode)
 	}
 }
 
@@ -116,6 +152,16 @@ func TestServeHTTPFailsClosed(t *testing.T) {
 	err = Serve(context.Background(), srv, HTTPOptions{Addr: "127.0.0.1:0", TLSCert: "cert.pem"})
 	if err == nil || !strings.Contains(err.Error(), "TLS") {
 		t.Errorf("TLS cert without key: err = %v, want a TLS pairing error", err)
+	}
+
+	err = Serve(context.Background(), srv, HTTPOptions{Addr: "0.0.0.0:0", Token: strings.Repeat("x", 24)})
+	if err == nil || !strings.Contains(err.Error(), "cleartext") {
+		t.Errorf("non-loopback cleartext: err = %v, want cleartext refusal", err)
+	}
+
+	err = Serve(context.Background(), srv, HTTPOptions{Addr: "0.0.0.0:0", Token: "short", TLSCert: "cert.pem", TLSKey: "key.pem"})
+	if err == nil || !strings.Contains(err.Error(), "short token") {
+		t.Errorf("non-loopback short token: err = %v, want short-token refusal", err)
 	}
 }
 
@@ -175,7 +221,7 @@ func recipeBackend(w http.ResponseWriter, _ *http.Request) {
 }
 
 func TestEndToEndStreamableOverHTTP(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret", nil))
 	t.Cleanup(front.Close)
 	roundTripTools(t, &mcp.StreamableClientTransport{
 		Endpoint:   front.URL + "/mcp",
@@ -184,7 +230,7 @@ func TestEndToEndStreamableOverHTTP(t *testing.T) {
 }
 
 func TestEndToEndSSEOverHTTP(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret", nil))
 	t.Cleanup(front.Close)
 	roundTripTools(t, &mcp.SSEClientTransport{
 		Endpoint:   front.URL + "/sse",
@@ -193,7 +239,7 @@ func TestEndToEndSSEOverHTTP(t *testing.T) {
 }
 
 func TestEndToEndStreamableRejectsBadToken(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret", nil))
 	t.Cleanup(front.Close)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:   front.URL + "/mcp",
@@ -228,7 +274,7 @@ func TestH2CCleartextRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("h2c GET: %v", err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.ProtoMajor != 2 {
 		t.Errorf("ProtoMajor = %d, want 2 (cleartext HTTP/2 not negotiated)", resp.ProtoMajor)
 	}
@@ -308,7 +354,7 @@ func TestH2OverTLSServeListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS GET: %v", err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.ProtoMajor != 2 {
 		t.Errorf("ProtoMajor = %d, want 2 (h2 over TLS/ALPN, real ServeTLS path)", resp.ProtoMajor)
 	}
@@ -319,8 +365,9 @@ func TestH2OverTLSServeListener(t *testing.T) {
 	}
 }
 
-// TestServeHappyPath covers Serve's loopback-no-token path end to end: it binds,
-// logs the warning, serves, and shuts down cleanly on context cancel.
+// TestServeHappyPath covers Serve's loopback-no-token wrapper path: it binds and
+// shuts down cleanly on context cancel. Real serving is covered by serveListener
+// round-trip tests, where the ephemeral port is observable.
 func TestServeHappyPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -345,7 +392,11 @@ func TestServeBindFailureSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("closing listener: %v", err)
+		}
+	}()
 	// Binding the already-taken loopback address must fail loudly.
 	err = Serve(context.Background(), mcpServer(t, nil), HTTPOptions{Addr: ln.Addr().String()})
 	if err == nil || !strings.Contains(err.Error(), ln.Addr().String()) {
@@ -357,7 +408,7 @@ func TestServeBindFailureSurfaces(t *testing.T) {
 // works: a request arriving on loopback with a non-loopback Host header and a
 // valid bearer is NOT rejected (403) by the SDK's DNS-rebinding guard.
 func TestRebindProtectionDisabledWithToken(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret", nil))
 	t.Cleanup(front.Close)
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer secret")
@@ -367,7 +418,7 @@ func TestRebindProtectionDisabledWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode == http.StatusForbidden {
 		t.Errorf("got 403: DNS-rebinding guard still rejects a proxied Host with a valid token")
 	}
@@ -376,7 +427,7 @@ func TestRebindProtectionDisabledWithToken(t *testing.T) {
 // TestRebindProtectionOnWithoutToken keeps the guard for the unauthenticated
 // loopback case: a non-loopback Host must be rejected.
 func TestRebindProtectionOnWithoutToken(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), ""))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "", nil))
 	t.Cleanup(front.Close)
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -385,7 +436,7 @@ func TestRebindProtectionOnWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 (DNS-rebinding guard must stay on without a token)", resp.StatusCode)
 	}
@@ -394,7 +445,7 @@ func TestRebindProtectionOnWithoutToken(t *testing.T) {
 // TestBearerSchemeCaseInsensitive checks RFC 7235 case-insensitive scheme
 // matching, while a wrong token is still rejected.
 func TestBearerSchemeCaseInsensitive(t *testing.T) {
-	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret", nil))
 	t.Cleanup(front.Close)
 	do := func(authz string) int {
 		req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
@@ -404,7 +455,7 @@ func TestBearerSchemeCaseInsensitive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		closeBody(t, resp)
 		return resp.StatusCode
 	}
 	if got := do("bearer secret"); got == http.StatusUnauthorized {

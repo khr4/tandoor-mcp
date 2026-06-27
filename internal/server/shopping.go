@@ -27,7 +27,16 @@ type apiShoppingEntry struct {
 type shoppingItem struct {
 	ID      int    `json:"id"`
 	Item    string `json:"item"`
+	Amount  string `json:"amount,omitempty"`
+	Unit    string `json:"unit,omitempty"`
+	Food    string `json:"food,omitempty"`
 	Checked bool   `json:"checked"`
+}
+
+type shoppingListOutput struct {
+	Items     []shoppingItem `json:"items"`
+	Truncated bool           `json:"truncated,omitempty"`
+	Note      string         `json:"note,omitempty"`
 }
 
 func (e apiShoppingEntry) line() string {
@@ -41,8 +50,9 @@ func (e apiShoppingEntry) line() string {
 	return formatIngredient(ing)
 }
 
-// shoppingEntries fetches all shopping list entries, following pagination.
-func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, error) {
+// shoppingEntries fetches shopping list entries, following pagination up to a
+// hard cap. truncated reports when more entries may exist beyond the cap.
+func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, bool, error) {
 	var all []apiShoppingEntry
 	for page := 1; page <= shoppingScanPages; page++ {
 		q := url.Values{}
@@ -50,29 +60,32 @@ func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, err
 		q.Set("page_size", "200")
 		raw, err := h.c.Do(ctx, http.MethodGet, "shopping-list-entry/", q, nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		var env listEnvelope
 		if err := json.Unmarshal(raw, &env); err == nil && len(env.Results) > 0 {
 			var batch []apiShoppingEntry
 			if err := json.Unmarshal(env.Results, &batch); err != nil {
-				return nil, fmt.Errorf("decoding shopping list: %w", err)
+				return nil, false, fmt.Errorf("decoding shopping list: %w", err)
 			}
 			all = append(all, batch...)
 			if env.Next == nil || *env.Next == "" {
 				break
+			}
+			if page == shoppingScanPages {
+				return all, true, nil
 			}
 			continue
 		}
 		// Not a paginated envelope (bare array, or empty): decode once and stop.
 		var batch []apiShoppingEntry
 		if err := decodeList(raw, &batch); err != nil {
-			return nil, fmt.Errorf("decoding shopping list: %w", err)
+			return nil, false, fmt.Errorf("decoding shopping list: %w", err)
 		}
 		all = append(all, batch...)
 		break
 	}
-	return all, nil
+	return all, false, nil
 }
 
 // ---- get_shopping_list ----
@@ -83,7 +96,7 @@ type getShoppingInput struct {
 
 // getShoppingList returns current shopping list entries as readable lines.
 func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in getShoppingInput) (*mcp.CallToolResult, any, error) {
-	entries, err := h.shoppingEntries(ctx)
+	entries, truncated, err := h.shoppingEntries(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,9 +106,20 @@ func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, 
 		if e.Checked && !includeChecked {
 			continue
 		}
-		items = append(items, shoppingItem{ID: e.ID, Item: e.line(), Checked: e.Checked})
+		item := shoppingItem{ID: e.ID, Item: e.line(), Amount: e.Amount.String(), Checked: e.Checked}
+		if e.Unit != nil {
+			item.Unit = e.Unit.Name
+		}
+		if e.Food != nil {
+			item.Food = e.Food.Name
+		}
+		items = append(items, item)
 	}
-	return jsonResult(items)
+	out := shoppingListOutput{Items: items, Truncated: truncated}
+	if truncated {
+		out.Note = fmt.Sprintf("scanned the first %d pages; more shopping entries may exist", shoppingScanPages)
+	}
+	return jsonResult(out)
 }
 
 // ---- add_to_shopping_list ----
@@ -191,9 +215,12 @@ type clearShoppingInput struct {
 // if some deletions fail.
 func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest, in clearShoppingInput) (*mcp.CallToolResult, any, error) {
 	onlyChecked := in.OnlyChecked == nil || *in.OnlyChecked
-	entries, err := h.shoppingEntries(ctx)
+	entries, truncated, err := h.shoppingEntries(ctx)
 	if err != nil {
 		return nil, nil, err
+	}
+	if truncated {
+		return nil, nil, fmt.Errorf("refusing to clear shopping list after a partial scan of %d pages; use tandoor_list with explicit pagination", shoppingScanPages)
 	}
 	removed := 0
 	var failures []string

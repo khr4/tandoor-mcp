@@ -19,6 +19,7 @@ type apiMealPlan struct {
 	Servings flexNum `json:"servings"`
 	Recipe   *named  `json:"recipe"`
 	MealType *named  `json:"meal_type"`
+	Note     string  `json:"note"`
 }
 
 type mealPlanCard struct {
@@ -30,10 +31,11 @@ type mealPlanCard struct {
 	RecipeID int    `json:"recipe_id,omitempty"`
 	Servings string `json:"servings,omitempty"`
 	Title    string `json:"title,omitempty"`
+	Note     string `json:"note,omitempty"`
 }
 
 func toMealPlanCard(m apiMealPlan) mealPlanCard {
-	c := mealPlanCard{ID: m.ID, Date: m.FromDate, Servings: m.Servings.String(), Title: m.Title}
+	c := mealPlanCard{ID: m.ID, Date: m.FromDate, Servings: m.Servings.String(), Title: m.Title, Note: m.Note}
 	if m.ToDate != "" && m.ToDate != m.FromDate {
 		c.EndDate = m.ToDate
 	}

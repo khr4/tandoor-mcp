@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -47,26 +49,29 @@ func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 	q := url.Values{}
 	addStr(q, "query", in.Text)
 
-	var warnings []string
 	if len(in.Keywords) > 0 {
-		ids, w := h.resolveExistingIDs(ctx, "keyword", "keyword", in.Keywords)
+		ids, err := h.resolveRequiredIDs(ctx, "keyword", "keyword", in.Keywords)
+		if err != nil {
+			return nil, nil, err
+		}
 		addInts(q, "keywords_and", ids) // _and = match ALL (bare param is OR)
-		warnings = append(warnings, w...)
 	}
 	if len(in.Ingredients) > 0 {
-		ids, w := h.resolveExistingIDs(ctx, "food", "ingredient", in.Ingredients)
+		ids, err := h.resolveRequiredIDs(ctx, "food", "ingredient", in.Ingredients)
+		if err != nil {
+			return nil, nil, err
+		}
 		addInts(q, "foods_and", ids)
-		warnings = append(warnings, w...)
 	}
 	if in.Book != "" {
-		id, found, err := h.resolveExistingID(ctx, "recipe-book", in.Book)
+		id, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", in.Book)
 		switch {
 		case err != nil:
-			warnings = append(warnings, fmt.Sprintf("could not look up recipe book %q: %v; ignored as a filter", in.Book, err))
+			return nil, nil, err
 		case found:
 			q.Set("books_and", strconv.Itoa(id))
 		default:
-			warnings = append(warnings, fmt.Sprintf("recipe book %q not found; ignored as a filter", in.Book))
+			return nil, nil, fmt.Errorf("recipe book %q not found", in.Book)
 		}
 	}
 	addInt(q, "rating_gte", in.MinRating)
@@ -93,7 +98,7 @@ func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 	if err := json.Unmarshal(env.Results, &recipes); err != nil {
 		return nil, nil, fmt.Errorf("decoding recipes: %w", err)
 	}
-	out := findRecipesOutput{Count: env.Count, Returned: len(recipes), Warnings: warnings}
+	out := findRecipesOutput{Count: env.Count, Returned: len(recipes)}
 	for _, r := range recipes {
 		out.Recipes = append(out.Recipes, toCard(r))
 	}
@@ -112,6 +117,7 @@ type getRecipeOutput struct {
 	Name           string        `json:"name"`
 	Rating         string        `json:"rating,omitempty"`
 	Servings       string        `json:"servings,omitempty"`
+	StoredServings string        `json:"stored_servings,omitempty"`
 	WorkingTimeMin string        `json:"working_time_min,omitempty"`
 	WaitingTimeMin string        `json:"waiting_time_min,omitempty"`
 	Keywords       []string      `json:"keywords,omitempty"`
@@ -119,6 +125,7 @@ type getRecipeOutput struct {
 	Nutrition      *nutritionOut `json:"nutrition,omitempty"`
 	Properties     []propertyOut `json:"properties,omitempty"`
 	Steps          []stepOut     `json:"steps"`
+	Warnings       []string      `json:"warnings,omitempty"`
 	Markdown       string        `json:"markdown"`
 }
 
@@ -136,18 +143,21 @@ func (h *handlers) getRecipe(ctx context.Context, _ *mcp.CallToolRequest, in get
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, nil, fmt.Errorf("decoding recipe: %w", err)
 	}
+	rendered := cloneRecipe(r)
+	var warnings []string
 	if in.Servings != nil && *in.Servings > 0 && r.Servings.Set && r.Servings.Value > 0 {
-		scaleAmounts(&r, float64(*in.Servings)/r.Servings.Value)
-		r.Servings = flexNum{Set: true, Value: float64(*in.Servings)}
+		scaleAmounts(&rendered, float64(*in.Servings)/r.Servings.Value)
+		rendered.Servings = flexNum{Set: true, Value: float64(*in.Servings)}
+		warnings = append(warnings, "markdown amounts are scaled for display; structured steps keep stored amounts for safe editing")
 	}
 	return jsonResult(getRecipeOutput{
-		ID: r.ID, Name: r.Name, Rating: r.Rating.String(), Servings: r.Servings.String(),
+		ID: r.ID, Name: r.Name, Rating: r.Rating.String(), Servings: rendered.Servings.String(), StoredServings: r.Servings.String(),
 		WorkingTimeMin: r.WorkingTime.String(), WaitingTimeMin: r.WaitingTime.String(),
 		Keywords: keywordNames(r.Keywords), SourceURL: r.SourceURL,
 		// Nutrition is shown as stored, never re-scaled: its basis (per-recipe vs
 		// per-serving) is configuration-dependent, so scaling it would mislead.
 		Nutrition: toNutrition(r), Properties: toProperties(r),
-		Steps: toStepOuts(r), Markdown: renderRecipe(r),
+		Steps: toStepOuts(r), Warnings: warnings, Markdown: renderRecipe(rendered),
 	})
 }
 
@@ -221,8 +231,9 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 // ---- import_recipe_from_url ----
 
 type importRecipeInput struct {
-	URL  string `json:"url" jsonschema:"recipe web page URL to import (http/https)"`
-	Save *bool  `json:"save,omitempty" jsonschema:"save to your collection (default true); false returns a parsed preview only"`
+	URL          string `json:"url" jsonschema:"recipe web page URL to import (http/https public host)"`
+	Save         *bool  `json:"save,omitempty" jsonschema:"save to your collection (default true); false returns a parsed preview only when Tandoor returns a parsed recipe without saving server-side"`
+	AllowPartial *bool  `json:"allow_partial,omitempty" jsonschema:"save even if Tandoor's parser drops ingredients without a parsed food (default false)"`
 }
 
 type sourceRecipe struct {
@@ -267,7 +278,7 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	raw, err := h.c.Do(ctx, http.MethodPost, "recipe-from-source/", nil, map[string]any{"url": in.URL})
 	if err != nil {
 		if msg, ok := importErrorMessage(err); ok {
-			return textResult("could not import: " + msg)
+			return nil, nil, fmt.Errorf("could not import: %s", msg)
 		}
 		return nil, nil, err
 	}
@@ -281,8 +292,12 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, nil, fmt.Errorf("decoding scrape response: %w", err)
 	}
+	save := in.Save == nil || *in.Save
 	// YouTube / Tandoor-share URLs are saved server-side and return only an id.
 	if resp.RecipeID != nil && *resp.RecipeID > 0 {
+		if !save {
+			return nil, nil, fmt.Errorf("preview is not available for this source: Tandoor already imported recipe id %d server-side", *resp.RecipeID)
+		}
 		return jsonResult(importRecipeOutput{ID: *resp.RecipeID, Status: "imported", Source: in.URL, Duplicates: resp.Duplicates})
 	}
 	if resp.Error || len(resp.Recipe) == 0 || string(resp.Recipe) == "null" {
@@ -290,14 +305,13 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 		if msg == "" {
 			msg = "no recipe found at that URL"
 		}
-		return textResult("could not import: " + msg)
+		return nil, nil, fmt.Errorf("could not import: %s", msg)
 	}
 	var sr sourceRecipe
 	if err := json.Unmarshal(resp.Recipe, &sr); err != nil {
 		return nil, nil, fmt.Errorf("decoding parsed recipe: %w", err)
 	}
 
-	save := in.Save == nil || *in.Save
 	if !save {
 		return jsonResult(importRecipeOutput{
 			Status: "preview", Name: sr.Name, Source: in.URL, ImageURL: sr.ImageURL,
@@ -306,6 +320,9 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	}
 
 	body, warnings := sourceRecipeToBody(sr, in.URL)
+	if len(warnings) > 0 && (in.AllowPartial == nil || !*in.AllowPartial) {
+		return nil, nil, fmt.Errorf("refusing to save parsed recipe because %d ingredient(s) would be dropped; call with save=false to preview or allow_partial=true to save anyway: %s", len(warnings), strings.Join(warnings, "; "))
+	}
 	created, err := h.c.Do(ctx, http.MethodPost, "recipe/", nil, body)
 	if err != nil {
 		return nil, nil, err
@@ -463,19 +480,15 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 	path := fmt.Sprintf("recipe/%d/image/", id)
 	switch {
 	case in.ImagePath != "":
-		full, err := h.safeImagePath(in.ImagePath)
+		f, size, err := h.openSafeImage(in.ImagePath)
 		if err != nil {
 			return nil, nil, err
 		}
-		if fi, err := os.Stat(full); err == nil && fi.Size() > maxImageBytes {
-			return nil, nil, fmt.Errorf("image is %d bytes, larger than the %d byte limit", fi.Size(), maxImageBytes)
+		defer func() { _ = f.Close() }()
+		if size > maxImageBytes {
+			return nil, nil, fmt.Errorf("image is %d bytes, larger than the %d byte limit", size, maxImageBytes)
 		}
-		f, err := os.Open(full)
-		if err != nil {
-			return nil, nil, errImagePathDenied
-		}
-		defer f.Close()
-		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(full), io.LimitReader(f, maxImageBytes)); err != nil {
+		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(f.Name()), io.LimitReader(f, maxImageBytes)); err != nil {
 			return nil, nil, err
 		}
 		return jsonResult(map[string]any{"status": "image set", "id": id, "from": "file"})
@@ -515,6 +528,27 @@ func (h *handlers) safeImagePath(p string) (string, error) {
 		return "", errImagePathDenied
 	}
 	return full, nil
+}
+
+func (h *handlers) openSafeImage(p string) (*os.File, int64, error) {
+	full, err := h.safeImagePath(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, 0, errImagePathDenied
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, errImagePathDenied
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, 0, errImagePathDenied
+	}
+	return f, fi.Size(), nil
 }
 
 // ---- find_related_recipes ----
@@ -601,7 +635,7 @@ func setInt(body map[string]any, key string, v *int) {
 	}
 }
 
-// validateHTTPURL rejects URLs that aren't http/https with a host, before any
+// validateHTTPURL rejects URLs that aren't public http/https targets before any
 // agent-supplied URL is handed to Tandoor's server-side fetcher.
 func validateHTTPURL(raw string) error {
 	raw = strings.TrimSpace(raw)
@@ -615,10 +649,35 @@ func validateHTTPURL(raw string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("URL must be http or https, got %q", u.Scheme)
 	}
-	if u.Host == "" {
+	host := strings.Trim(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
 		return fmt.Errorf("URL must include a host")
 	}
+	if u.User != nil {
+		return fmt.Errorf("URL must not include credentials")
+	}
+	if isUnsafeFetchHost(host) {
+		return fmt.Errorf("URL host %q is not allowed for server-side fetching", host)
+	}
 	return nil
+}
+
+func isUnsafeFetchHost(host string) bool {
+	switch host {
+	case "localhost", "localhost.localdomain":
+		return true
+	}
+	for _, suffix := range []string{".localhost", ".local", ".internal", ".lan", ".home", ".corp"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 
 // importErrorMessage extracts Tandoor's friendly failure message from a 400.

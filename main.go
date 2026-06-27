@@ -8,7 +8,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -41,15 +44,21 @@ func main() {
 
 	if addr := strings.TrimSpace(os.Getenv("TANDOOR_HTTP_ADDR")); addr != "" {
 		err = server.Serve(ctx, srv, server.HTTPOptions{
-			Addr:    addr,
-			Token:   strings.TrimSpace(os.Getenv("TANDOOR_MCP_TOKEN")),
-			TLSCert: strings.TrimSpace(os.Getenv("TANDOOR_TLS_CERT")),
-			TLSKey:  strings.TrimSpace(os.Getenv("TANDOOR_TLS_KEY")),
+			Addr:                      addr,
+			Token:                     strings.TrimSpace(os.Getenv("TANDOOR_MCP_TOKEN")),
+			TLSCert:                   strings.TrimSpace(os.Getenv("TANDOOR_TLS_CERT")),
+			TLSKey:                    strings.TrimSpace(os.Getenv("TANDOOR_TLS_KEY")),
+			AllowCleartextNonLoopback: strings.EqualFold(strings.TrimSpace(os.Getenv("TANDOOR_HTTP_ALLOW_CLEAR")), "true"),
+			ReadyCheck: func(ctx context.Context) error {
+				q := url.Values{"page_size": []string{"1"}}
+				_, err := client.Do(ctx, http.MethodGet, "recipe/", q, nil)
+				return err
+			},
 		})
 	} else {
 		err = srv.Run(ctx, &mcp.StdioTransport{})
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("server stopped: %v", err)
 	}
 }

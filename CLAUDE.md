@@ -9,7 +9,8 @@ Go, single binary, configured via environment variables.
 make build        # go build ./...
 make test         # go test ./...   (no network; uses httptest)
 make vet          # go vet ./...
-make lint         # golangci-lint run (if installed)
+make lint         # golangci-lint run ./... (if installed)
+make verify       # vet + test + lint + secret-scan
 go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
 ```
 
@@ -32,8 +33,9 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
     - `resolve.go` — resolve names to ids (find-existing / get-or-create).
     - `format.go` — recipe cards, readable render, tolerant number parsing.
   - **Generic tools** (`crud.go`, `resources.go`) — `tandoor_list/get/create/
-    update/delete/action` + `tandoor_resources`. A thin escape hatch covering every
-    resource for cases the designed tools don't handle. NOT the primary surface.
+    update/delete/action` + `tandoor_resources`. A restricted escape hatch for
+    non-secret, non-admin, non-raw-log resources the designed tools don't handle.
+    NOT the primary surface.
   - `server.go` — server construction, tool registration, result helpers.
 
 Design rule: tools are shaped around what an agent is doing, not around REST
@@ -42,8 +44,8 @@ plumbing over exposing raw CRUD. When adding a workflow, resolve names to ids an
 keep quantities (amount + unit) first-class.
 
 Tools register with `mcp.AddTool[In, any]`: typed input struct (the SDK infers the
-input JSON Schema), output type `any` so handlers return JSON/text content with no
-output-schema constraints.
+input JSON Schema), output type `any` so handlers can return readable text content
+plus `structuredContent` without per-tool output-schema constraints.
 
 ## Engineering discipline (non-negotiable)
 
@@ -66,7 +68,8 @@ This codebase is maintained to a strict standard. Hold the line:
   rather than shipping a dedicated tool with a fabricated body. Dedicated tools
   exist only for endpoints whose contract is known.
 - **Errors surface, never swallow.** Return `APIError` and wrapped errors up to the
-  tool result; do not log-and-continue or discard the API's message.
+  tool result; do not log-and-continue, silently broaden filters, silently save
+  partial imports, or discard the API's message.
 - **Build and test must be green before done.** `make vet test` passes, or it is
   not finished.
 
@@ -82,16 +85,17 @@ This codebase is maintained to a strict standard. Hold the line:
   a real instance. Tests use synthetic fixtures only.
 - **Use the tracked hook.** Run `make install-hooks` once in a checkout to enable
   `.githooks/pre-commit`; it requires `git-secrets` and registers this repo's
-  provider patterns. Run `make secret-scan` before committing if hooks are not
-  installed.
+  provider patterns, including `TANDOOR_*TOKEN` env and JSON forms. Run
+  `make secret-scan` before committing if hooks are not installed.
 - **Redact before sharing failures.** When copying tool output into issues,
   commits, or docs, replace hostnames, bearer values, tokens, and user-specific
   recipe data with placeholders.
 
 ## Adding to the surface
 
-- **New CRUD resource:** add one row to `resources` in `resources.go`. It is
-  immediately reachable via the generic tools. Nothing else required.
+- **New CRUD resource:** add one row to `resources` in `resources.go`. If it can
+  expose credentials, account/admin state, uploaded files, logs, invitations,
+  personal settings or other raw PII, add it to `restrictedResources` too.
 - **New custom endpoint:** it already works through `tandoor_action`. Add a
   dedicated tool only when (a) the request/response contract is verified and (b) a
   typed input meaningfully helps the caller. Put it in `recipes.go` (or a sibling),
