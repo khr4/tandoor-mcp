@@ -8,9 +8,10 @@ Go, single binary, configured via environment variables.
 ```sh
 make build        # go build ./...
 make test         # go test ./...   (no network; uses httptest)
+make coverage     # go test with coverage profile; fails below 85%
 make vet          # go vet ./...
 make lint         # golangci-lint run ./... (if installed)
-make verify       # vet + test + lint + secret-scan
+make verify       # vet + coverage + lint + secret-scan
 go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
 ```
 
@@ -19,11 +20,12 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
 - `main.go` — entrypoint: read env config, build client, serve MCP over stdio
   or HTTP when configured.
 - `internal/tandoor/` — HTTP client. `Do` (JSON) and `Upload` (multipart), Bearer
-  auth, query building, safe-read retry/backoff, upstream concurrency cap,
-  circuit breaker, `APIError` carrying the verbatim API body, and
-  `OutcomeUnknownError` for mutating requests whose commit status cannot be
-  proven after a temporary failure. Treats bodies as opaque JSON on purpose —
-  the API is large and version-dependent.
+  auth, query building, safe-read retry/backoff with jitter and `Retry-After`,
+  upstream concurrency cap, circuit breaker, `APIError` carrying the verbatim API
+  body, and `OutcomeUnknownError` for mutating requests whose commit status
+  cannot be proven after a temporary failure or cancellation after the request is
+  attempted. Treats bodies as opaque JSON on purpose — the API is large and
+  version-dependent.
 - `internal/server/` — MCP tools, in two layers.
   - **Designed tools** (the point of this server) — task-oriented, ergonomic for
     agents: name-based inputs, parsed quantities, compact/readable output.
@@ -46,7 +48,7 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
   - `server.go` — server construction, tool registration, per-tool operation
     timeout wrapper, structured error helpers.
   - `http.go` / `readiness.go` — Streamable HTTP/SSE transport and cached,
-    sanitized readiness checks against the real Tandoor API.
+    sanitized JSON readiness checks against the real Tandoor API.
 
 Design rule: tools are shaped around what an agent is doing, not around REST
 endpoints. Prefer a designed tool that hides nested serializer shapes and id
@@ -67,6 +69,10 @@ processable image for Tandoor. Otherwise check the Tandoor runtime's pod/server
 egress, network policy, DNS, TLS/proxy configuration and remote-site blocking.
 Use `image_base64` or `image_path` when Tandoor cannot handle external image
 URLs.
+
+Release versioning is tag-driven. `internal/server.Version` defaults to `dev`;
+Docker/tag builds override it with
+`-X github.com/khr4/tandoor-mcp/internal/server.Version=${VERSION}`.
 
 Tools register with `mcp.AddTool[In, any]`: typed input struct (the SDK infers the
 input JSON Schema), output type `any` so handlers can return readable text content
@@ -99,8 +105,8 @@ This codebase is maintained to a strict standard. Hold the line:
   tool result; do not log-and-continue, silently broaden filters, silently save
   partial imports, or discard the API's message. Partial mutations must set
   `CallToolResult.IsError`; ambiguous writes must use a structured
-  `outcome_unknown` result rather than claiming success. Pre-send failures must
-  surface as `not_attempted`, not `outcome_unknown`.
+  `outcome_unknown` result rather than claiming success. Pre-send failures and
+  open-circuit fast-fails must surface as `not_attempted`, not `outcome_unknown`.
 - **Errors stay agent-safe.** Tool/readiness errors use structured status objects
   and bounded body/cause excerpts so agents are not flooded or confused by huge
   upstream payloads. This is a context-size and agent-safety guard, not a privacy
@@ -109,8 +115,12 @@ This codebase is maintained to a strict standard. Hold the line:
   ambiguous mutating failure, keep the per-item `outcome_unknown` failure and use
   an aggregate status such as `partial_outcome_unknown`. Do not flatten it into a
   generic string.
-- **Build and test must be green before done.** `make vet test` passes, or it is
-  not finished.
+- **Guarded recipe writes use fresh revisions.** `update_recipe` keyword edits
+  and `set_recipe_steps` require `expected_revision`; successful guarded writes
+  return a new `edit_revision`. Re-read or use that returned revision before the
+  next guarded mutation.
+- **Build and test must be green before done.** `make verify` passes, including
+  the 85% coverage gate and secret scan, or it is not finished.
 
 ## Security and privacy discipline
 
@@ -144,5 +154,9 @@ This codebase is maintained to a strict standard. Hold the line:
   model consumption; otherwise add a dedicated tool once the request/response
   contract is verified. Cover either path with an `httptest`-backed test asserting
   the exact method, path, query and body.
+- **Generic input validation is part of the contract.** Keep query keys, ordering,
+  object ids, action paths and JSON bodies bounded and syntactically constrained.
+  Do not relax those checks just to pass through an odd serializer shape; add a
+  designed tool or a narrow allowlist extension with tests.
 - Optional fields **must** be tagged `,omitempty` (the SDK marks any field without
   it as required). Required fields omit it.

@@ -37,13 +37,17 @@ Configured entirely via environment variables:
 The token is sent as `Authorization: Bearer <token>`.
 
 Safe read requests (`GET`) retry temporary upstream failures with bounded
-exponential backoff and `Retry-After` support. Mutating requests are never
-blindly retried: if a timeout or temporary upstream failure leaves the commit
-status unknown, the tool returns a structured `outcome_unknown` MCP error.
-Failures before a request is handed to Tandoor return `not_attempted`, which is
-safe to retry after the local cause is resolved. Tool errors are object-shaped
-structured JSON with bounded body/cause excerpts to keep agent context useful and
-small; this is an agent-safety guard, not a privacy redaction boundary.
+exponential backoff, jitter and `Retry-After` support. Mutating requests are
+never blindly retried: if a timeout, cancellation after send, or temporary
+upstream failure leaves the commit status unknown, the tool returns a structured
+`outcome_unknown` MCP error. Failures before a request is handed to Tandoor
+return `not_attempted`, which is safe to retry after the local cause is resolved.
+The upstream circuit breaker fast-fails after repeated temporary failures and
+allows one half-open probe after the cooldown.
+
+Tool errors are object-shaped structured JSON with bounded body/cause excerpts to
+keep agent context useful and small; this is an agent-safety guard, not a privacy
+redaction boundary.
 
 ### Transport
 
@@ -61,8 +65,10 @@ per-client launch (`.mcp.json` / `claude_desktop_config.json`). Set
 The HTTP transport exposes the modern **Streamable HTTP** transport at `/mcp`
 (request/response plus SSE streaming), the legacy **SSE** transport at `/sse`,
 an unauthenticated `/healthz` liveness probe, and `/readyz`, which checks Tandoor
-with the configured API token. Readiness results are briefly cached and failure
-responses are sanitized so upstream error bodies are not exposed publicly.
+with the configured API token. Health/readiness responses are JSON:
+`{"status":"ok"}`, `{"status":"ready"}`, `{"status":"unready"}` or
+`{"status":"not_configured"}`. Readiness results are briefly cached and failure
+responses do not expose upstream error bodies.
 HTTP/1.1 and HTTP/2 are both served (h2 over TLS, h2c in cleartext).
 
 **Behind a reverse proxy** (the common case): bind loopback and let the proxy on
@@ -113,7 +119,8 @@ docker build -t tandoor-mcp .
 ```
 
 Or pull a published release (built and pushed to GHCR on each tag by
-`.github/workflows/docker.yml`):
+`.github/workflows/docker.yml`). The runtime version reported to MCP clients is
+tag-driven: release builds pass the git tag into the binary through Go ldflags.
 
 ```sh
 docker pull ghcr.io/khr4/tandoor-mcp:latest
@@ -175,6 +182,11 @@ For any mutation returning `outcome_unknown` or `partial_outcome_unknown`, re-re
 the affected recipe, shopping list, pantry, taxonomy or book state before
 retrying. The upstream request reached Tandoor and may have committed.
 
+`edit_revision` changes after guarded recipe writes. For `update_recipe` keyword
+edits or any `set_recipe_steps` call, use the latest revision returned by
+`get_recipe` or by the previous successful guarded mutation. Reusing an older
+revision is a stale-write error by design.
+
 For generated images, pass the final base64 bytes directly to `set_recipe_image`
 as `image_base64`. This matches OpenAI Image API `data[0].b64_json`, OpenAI
 Responses API `image_generation_call.result`, and MCP `ImageContent.data`; pass
@@ -213,7 +225,10 @@ sync surfaces require designed tools or are blocked. `tandoor_action` allows onl
 Some capabilities are intentionally not exposed as designed tools until their
 safe contract is verified. Use the generic tools only when the designed surface
 does not cover a workflow and the target resource is visible in
-`tandoor_resources`. Generic API JSON responses are returned under `data`; empty,
+`tandoor_resources`. Generic list filters, ordering, ids, action paths and JSON
+bodies are bounded and validated before they are sent to Tandoor; this reduces
+accidental path traversal, oversized context, malformed query strings and raw
+serializer abuse. Generic API JSON responses are returned under `data`; empty,
 oversized and non-JSON upstream responses use explicit `empty_response`,
 `result_too_large` or `non_json_response` status objects.
 
@@ -221,11 +236,12 @@ oversized and non-JSON upstream responses use explicit `empty_response`,
 
 ```sh
 make test   # httptest-backed; no network or live instance required
+make coverage
 make vet
 make lint
 make install-hooks  # one-time local git-secrets hook setup
 make secret-scan
-make verify         # vet + test + lint + secret-scan
+make verify         # vet + coverage gate (85%+) + lint + secret-scan
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture and contribution discipline.
