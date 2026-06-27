@@ -190,6 +190,11 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, nil, fmt.Errorf("name is required")
 	}
+	// Refuse the ambiguous "both" case rather than silently dropping the
+	// top-level ingredients/instructions in favor of steps[].
+	if len(in.Steps) > 0 && (len(in.Ingredients) > 0 || in.Instructions != "") {
+		return nil, nil, fmt.Errorf("provide top-level ingredients/instructions for a simple recipe OR steps[] for a multi-step one, not both")
+	}
 	stepInputs := in.Steps
 	if len(stepInputs) == 0 && (len(in.Ingredients) > 0 || in.Instructions != "") {
 		stepInputs = []stepInput{{Instruction: in.Instructions, Ingredients: in.Ingredients}}

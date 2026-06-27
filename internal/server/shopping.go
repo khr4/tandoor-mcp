@@ -17,11 +17,12 @@ import (
 const shoppingScanPages = 50
 
 type apiShoppingEntry struct {
-	ID      int     `json:"id"`
-	Amount  flexNum `json:"amount"`
-	Unit    *named  `json:"unit"`
-	Food    *named  `json:"food"`
-	Checked bool    `json:"checked"`
+	ID       int     `json:"id"`
+	Amount   flexNum `json:"amount"`
+	Unit     *named  `json:"unit"`
+	Food     *named  `json:"food"`
+	Checked  bool    `json:"checked"`
+	NoAmount bool    `json:"no_amount"`
 }
 
 type shoppingItem struct {
@@ -40,7 +41,7 @@ type shoppingListOutput struct {
 }
 
 func (e apiShoppingEntry) line() string {
-	ing := apiIngredient{Amount: e.Amount}
+	ing := apiIngredient{Amount: e.Amount, NoAmount: e.NoAmount}
 	if e.Unit != nil {
 		ing.Unit = &apiUnit{Name: e.Unit.Name}
 	}
@@ -106,7 +107,10 @@ func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, 
 		if e.Checked && !includeChecked {
 			continue
 		}
-		item := shoppingItem{ID: e.ID, Item: e.line(), Amount: e.Amount.String(), Checked: e.Checked}
+		item := shoppingItem{ID: e.ID, Item: e.line(), Checked: e.Checked}
+		if !e.NoAmount {
+			item.Amount = e.Amount.String()
+		}
 		if e.Unit != nil {
 			item.Unit = e.Unit.Name
 		}
@@ -135,14 +139,17 @@ func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	if strings.TrimSpace(in.Food) == "" {
 		return nil, nil, fmt.Errorf("food is required")
 	}
-	amount := 1.0
-	if in.Amount != nil {
-		amount = *in.Amount
-	}
 	body := map[string]any{
 		"food":    map[string]any{"name": strings.TrimSpace(in.Food)},
-		"amount":  amount,
 		"checked": false,
+	}
+	// No amount given means a quantity-less item (e.g. "olive oil"), not "1 olive
+	// oil"; mark it no-amount rather than defaulting to 1.
+	if in.Amount != nil {
+		body["amount"] = *in.Amount
+	} else {
+		body["amount"] = 0
+		body["no_amount"] = true
 	}
 	if u := strings.TrimSpace(in.Unit); u != "" {
 		body["unit"] = map[string]any{"name": u}

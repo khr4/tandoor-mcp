@@ -60,7 +60,8 @@ func (h *handlers) buildSteps(ctx context.Context, steps []stepInput) ([]map[str
 	)
 	for si, st := range steps {
 		for ii, ing := range st.Ingredients {
-			if strings.TrimSpace(ing.Text) != "" {
+			// A header is emitted verbatim; never send its text to the parser.
+			if !ing.IsHeader && strings.TrimSpace(ing.Text) != "" {
 				texts = append(texts, ing.Text)
 				refs = append(refs, ref{si, ii})
 			}
@@ -122,6 +123,32 @@ func buildStep(instruction string, order int, minutes *int, ingredients []map[st
 // buildIngredient produces one nested ingredient payload. parsed is non-nil when
 // the input was a natural-language line.
 func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any, error) {
+	// A section header is checked first, before the parser branch, so that
+	// {is_header:true, text:"For the sauce"} is never run through the ingredient
+	// parser (which would create a phantom food). The header text may arrive in
+	// note or text.
+	if in.IsHeader {
+		text := strings.TrimSpace(in.Note)
+		if text == "" {
+			text = strings.TrimSpace(in.Text)
+		}
+		return map[string]any{
+			"is_header":     true,
+			"no_amount":     true,
+			"note":          text,
+			"food":          nil,
+			"unit":          nil,
+			"amount":        0,
+			"original_text": text,
+		}, nil
+	}
+
+	// A line is either a natural-language text line or structured fields, never
+	// both; refuse the mix rather than silently dropping the structured side.
+	if strings.TrimSpace(in.Text) != "" && (strings.TrimSpace(in.Food) != "" || in.Amount != nil || strings.TrimSpace(in.Unit) != "") {
+		return nil, fmt.Errorf("ingredient %q: provide a natural-language text line OR structured amount/unit/food, not both", strings.TrimSpace(in.Text))
+	}
+
 	if parsed != nil {
 		m := map[string]any{
 			"note":          parsed.Note,
@@ -130,14 +157,14 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 			"unit":          nil,
 			"food":          nil,
 		}
-		if parsed.Amount.Set {
+		if parsed.Amount.Set && parsed.Amount.Value != 0 {
 			m["amount"] = parsed.Amount.Value
 		} else {
-			// Absent or non-numeric amount: never claim a quantity of 0.
+			// The parser returns a numeric 0 (not a Raw token) for a line with no
+			// number, e.g. "salt to taste". Treat absent / zero / non-numeric all
+			// as no-amount so it never renders "0 salt".
 			m["amount"] = 0
-			if parsed.Amount.Raw != "" {
-				m["no_amount"] = true
-			}
+			m["no_amount"] = true
 		}
 		if parsed.Unit != nil && parsed.Unit.Name != "" {
 			m["unit"] = map[string]any{"name": parsed.Unit.Name}
@@ -148,17 +175,6 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		return m, nil
 	}
 
-	if in.IsHeader {
-		return map[string]any{
-			"is_header":     true,
-			"no_amount":     true,
-			"note":          in.Note,
-			"food":          nil,
-			"unit":          nil,
-			"amount":        0,
-			"original_text": in.Note,
-		}, nil
-	}
 	food := strings.TrimSpace(in.Food)
 	if food == "" {
 		return nil, fmt.Errorf("ingredient needs either text or a food name")
