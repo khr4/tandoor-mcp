@@ -10,5 +10,7 @@
 .claude/settings.local.json
 .mcp.json
 claude_desktop_config.json
+.agents/
+.codex/
 # Editor/OS noise
 .DS_Store

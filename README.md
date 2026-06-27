@@ -156,3 +156,7 @@ make verify         # vet + test + lint + secret-scan
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture and contribution discipline.
+
+## License
+
+[MIT](LICENSE).
