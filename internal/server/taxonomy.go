@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,14 @@ const maxListTaxonomyLimit = 200
 
 func validKind(kind string, allowed ...string) (string, error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "keywords":
+		kind = "keyword"
+	case "foods":
+		kind = "food"
+	case "units":
+		kind = "unit"
+	}
 	if slices.Contains(allowed, kind) {
 		return kind, nil
 	}
@@ -50,7 +59,7 @@ func (h *handlers) resolveTaxonomyID(ctx context.Context, kind, ref string) (int
 // ---- list_taxonomy ----
 
 type listTaxonomyInput struct {
-	Kind  string `json:"kind" jsonschema:"one of: keyword, food, unit"`
+	Kind  string `json:"kind" jsonschema:"one of: keyword, food, unit (plural aliases keywords/foods/units are accepted)"`
 	Query string `json:"query,omitempty" jsonschema:"filter by name substring"`
 	Limit *int   `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
@@ -79,11 +88,164 @@ func (h *handlers) listTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, nil, err
 	}
+	count := 0
+	truncated := false
+	var env listEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && len(env.Results) > 0 {
+		count = env.Count
+		truncated = env.Next != nil && *env.Next != ""
+	}
 	var items []named
 	if err := decodeList(raw, &items); err != nil {
 		return nil, nil, fmt.Errorf("decoding %s: %w", kind, err)
 	}
-	return jsonResult(map[string]any{"kind": kind, "items": items})
+	if count == 0 {
+		count = len(items)
+	}
+	return jsonResult(map[string]any{
+		"kind":      kind,
+		"query":     query,
+		"limit":     limit,
+		"returned":  len(items),
+		"count":     count,
+		"truncated": truncated,
+		"items":     items,
+	})
+}
+
+// ---- create_taxonomy ----
+
+type taxonomyItem struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	PluralName  string `json:"plural_name,omitempty"`
+	Description string `json:"description,omitempty"`
+	ParentID    int    `json:"parent_id,omitempty"`
+}
+
+type createTaxonomyInput struct {
+	Kind        string `json:"kind" jsonschema:"one of: keyword, food, unit"`
+	Name        string `json:"name" jsonschema:"new keyword/food/unit name"`
+	Parent      string `json:"parent,omitempty" jsonschema:"parent keyword or food name/id; only valid for keyword and food"`
+	PluralName  string `json:"plural_name,omitempty" jsonschema:"plural name; only valid for food and unit"`
+	Description string `json:"description,omitempty" jsonschema:"description text"`
+}
+
+func (h *handlers) createTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in createTaxonomyInput) (*mcp.CallToolResult, any, error) {
+	kind, err := validKind(in.Kind, "keyword", "food", "unit")
+	if err != nil {
+		return nil, nil, err
+	}
+	name, err := cleanName("name", in.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	body := map[string]any{"name": name}
+	if desc, err := cleanOptionalFreeText("description", in.Description); err != nil {
+		return nil, nil, err
+	} else if desc != "" {
+		body["description"] = desc
+	}
+	if plural, err := cleanOptionalName("plural_name", in.PluralName); err != nil {
+		return nil, nil, err
+	} else if plural != "" {
+		if kind == "keyword" {
+			return nil, nil, fmt.Errorf("plural_name is only valid for food and unit")
+		}
+		body["plural_name"] = plural
+	}
+	parentID := 0
+	if strings.TrimSpace(in.Parent) != "" {
+		if kind == "unit" {
+			return nil, nil, fmt.Errorf("parent is only valid for keyword and food")
+		}
+		parentID, err = h.resolveTaxonomyID(ctx, kind, in.Parent)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	raw, err := h.c.Do(ctx, http.MethodPost, kind+"/", nil, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	item, err := decodeTaxonomyItem(kind, raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if parentID > 0 {
+		if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("%s/%d/move/%d/", kind, item.ID, parentID), nil, nil); err != nil {
+			out := map[string]any{"status": "partial", "kind": kind, "item": item, "phase": "move_parent", "parent_id": parentID, "failure": toolErrorObject(err)}
+			return jsonErrorResult(out)
+		}
+		item.ParentID = parentID
+	}
+	return jsonResult(map[string]any{"status": "created", "kind": kind, "item": item})
+}
+
+// ---- rename_taxonomy ----
+
+type renameTaxonomyInput struct {
+	Kind        string  `json:"kind" jsonschema:"one of: keyword, food, unit"`
+	Item        string  `json:"item" jsonschema:"keyword/food/unit name or id to rename/update"`
+	Name        *string `json:"name,omitempty" jsonschema:"new name"`
+	PluralName  *string `json:"plural_name,omitempty" jsonschema:"new plural name; only valid for food and unit"`
+	Description *string `json:"description,omitempty" jsonschema:"new description"`
+}
+
+func (h *handlers) renameTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in renameTaxonomyInput) (*mcp.CallToolResult, any, error) {
+	kind, err := validKind(in.Kind, "keyword", "food", "unit")
+	if err != nil {
+		return nil, nil, err
+	}
+	id, err := h.resolveTaxonomyID(ctx, kind, in.Item)
+	if err != nil {
+		return nil, nil, err
+	}
+	body := map[string]any{}
+	if in.Name != nil {
+		name, err := cleanName("name", *in.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["name"] = name
+	}
+	if in.PluralName != nil {
+		if kind == "keyword" {
+			return nil, nil, fmt.Errorf("plural_name is only valid for food and unit")
+		}
+		plural, err := cleanOptionalName("plural_name", *in.PluralName)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["plural_name"] = plural
+	}
+	if in.Description != nil {
+		desc, err := cleanOptionalFreeText("description", *in.Description)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["description"] = desc
+	}
+	if len(body) == 0 {
+		return nil, nil, fmt.Errorf("provide name, plural_name, and/or description")
+	}
+	raw, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("%s/%d/", kind, id), nil, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	item, err := decodeTaxonomyItem(kind, raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"status": "renamed", "kind": kind, "item": item})
+}
+
+func decodeTaxonomyItem(kind string, raw json.RawMessage) (taxonomyItem, error) {
+	var item taxonomyItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return taxonomyItem{}, fmt.Errorf("decoding %s: %w", kind, err)
+	}
+	return item, nil
 }
 
 // ---- merge_taxonomy ----

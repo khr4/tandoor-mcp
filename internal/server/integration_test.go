@@ -69,13 +69,13 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 		"tandoor_get", "tandoor_create", "tandoor_update", "tandoor_delete",
 		"find_recipes", "get_recipe", "create_recipe", "import_recipe_from_url",
 		"update_recipe", "set_recipe_steps", "delete_recipe", "set_recipe_image",
-		"find_related_recipes", "log_cooked",
+		"find_related_recipes", "log_cooked", "get_cook_log",
 		"add_recipe_to_book", "remove_recipe_from_book", "list_recipe_books",
-		"plan_meal", "get_meal_plan", "remove_meal_plan_entry",
+		"plan_meal", "get_meal_plan", "update_meal_plan_entry", "remove_meal_plan_entry",
 		"get_shopping_list", "add_to_shopping_list", "add_recipe_to_shopping",
 		"update_shopping_item", "clear_shopping_list", "check_shopping_items",
-		"get_pantry", "set_food_on_hand",
-		"list_taxonomy", "merge_taxonomy", "move_taxonomy",
+		"get_pantry", "set_food_on_hand", "get_inventory",
+		"list_taxonomy", "create_taxonomy", "rename_taxonomy", "merge_taxonomy", "move_taxonomy",
 	}
 	if len(names) != len(wantTools) {
 		t.Errorf("registered tool count = %d, want %d (%v)", len(names), len(wantTools), names)
@@ -89,6 +89,9 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 		"tandoor_action":       "Raw responses are returned under data",
 		"tandoor_resources":    "Prefer designed tools first",
 		"set_recipe_steps":     "non-empty steps list",
+		"update_recipe":        "fresh edit_revision",
+		"get_cook_log":         "cook history",
+		"get_inventory":        "inventory entries",
 		"set_recipe_image":     "exactly one source",
 		"set_food_on_hand":     "exactly one of food",
 		"clear_shopping_list":  "partial_outcome_unknown",

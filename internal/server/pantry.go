@@ -116,7 +116,12 @@ func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 		}
 		id, err := h.setOneFoodOnHand(ctx, f, onHand)
 		if err != nil {
-			failures = append(failures, failureObject(err, map[string]any{"food": f}))
+			context := map[string]any{"food": f, "phase": "resolve_or_create"}
+			if id > 0 {
+				context["food_id"] = id
+				context["phase"] = "patch_on_hand"
+			}
+			failures = append(failures, failureObject(err, context))
 			continue
 		}
 		done = append(done, map[string]any{"food": f, "id": id})
@@ -162,7 +167,7 @@ func (h *handlers) setOneFoodOnHand(ctx context.Context, food string, onHand boo
 		id = foundID
 	}
 	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("food/%d/", id), nil, map[string]any{"food_onhand": onHand}); err != nil {
-		return 0, err
+		return id, err
 	}
 	return id, nil
 }

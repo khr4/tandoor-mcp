@@ -98,6 +98,7 @@ var restrictedResources = map[string]bool{
 	"space":              true,
 	"household":          true,
 	"group":              true,
+	"search-preference":  true,
 	"user-file":          true,
 	"view-log":           true,
 	"import-log":         true,

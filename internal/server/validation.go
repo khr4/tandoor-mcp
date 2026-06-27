@@ -25,6 +25,7 @@ const (
 	maxGenericObjectKeys      = 200
 	maxGenericBodyStringRunes = 8_000
 	maxGenericResultBytes     = 256 << 10
+	maxResultIDSamples        = 50
 )
 
 var orderingPattern = regexp.MustCompile(`^-?[A-Za-z_][A-Za-z0-9_]*$`)
@@ -255,4 +256,14 @@ func validatePublicHTTPURL(raw string) (string, error) {
 func isUnsafeFetchIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+func sampleInts(ids []int, limit int) []int {
+	if limit <= 0 || len(ids) == 0 {
+		return nil
+	}
+	if len(ids) <= limit {
+		return append([]int(nil), ids...)
+	}
+	return append([]int(nil), ids[:limit]...)
 }

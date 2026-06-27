@@ -227,7 +227,7 @@ func (h *handlers) genericDelete(ctx context.Context, _ *mcp.CallToolRequest, in
 
 type actionInput struct {
 	Method        string            `json:"method" jsonschema:"HTTP method: GET, POST, PUT, PATCH or DELETE"`
-	Path          string            `json:"path" jsonschema:"endpoint path relative to /api/, with a trailing slash (e.g. 'recipe/5/related/', 'fdc-search/', 'switch-active-space/2/')"`
+	Path          string            `json:"path" jsonschema:"allowlisted endpoint path relative to /api/, with a trailing slash (e.g. 'recipe/5/related/', 'recipe/flat/', 'fdc-search/')"`
 	Query         map[string]string `json:"query,omitempty" jsonschema:"query-string parameters with one value per key"`
 	QueryParams   []queryParam      `json:"query_params,omitempty" jsonschema:"ordered query-string parameters, allowing repeated names"`
 	Body          map[string]any    `json:"body,omitempty" jsonschema:"JSON object request body for POST/PUT/PATCH"`

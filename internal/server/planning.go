@@ -23,15 +23,16 @@ type apiMealPlan struct {
 }
 
 type mealPlanCard struct {
-	ID       int    `json:"id"`
-	Date     string `json:"date"`
-	EndDate  string `json:"end_date,omitempty"`
-	MealType string `json:"meal_type,omitempty"`
-	Recipe   string `json:"recipe,omitempty"`
-	RecipeID int    `json:"recipe_id,omitempty"`
-	Servings string `json:"servings,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Note     string `json:"note,omitempty"`
+	ID         int    `json:"id"`
+	Date       string `json:"date"`
+	EndDate    string `json:"end_date,omitempty"`
+	MealType   string `json:"meal_type,omitempty"`
+	MealTypeID int    `json:"meal_type_id,omitempty"`
+	Recipe     string `json:"recipe,omitempty"`
+	RecipeID   int    `json:"recipe_id,omitempty"`
+	Servings   string `json:"servings,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 func toMealPlanCard(m apiMealPlan) mealPlanCard {
@@ -41,6 +42,7 @@ func toMealPlanCard(m apiMealPlan) mealPlanCard {
 	}
 	if m.MealType != nil {
 		c.MealType = m.MealType.Name
+		c.MealTypeID = m.MealType.ID
 	}
 	if m.Recipe != nil {
 		c.Recipe, c.RecipeID = m.Recipe.Name, m.Recipe.ID
@@ -163,6 +165,90 @@ func (h *handlers) getMealPlan(ctx context.Context, _ *mcp.CallToolRequest, in g
 		cards = append(cards, toMealPlanCard(m))
 	}
 	return jsonResult(map[string]any{"entries": cards})
+}
+
+// ---- update_meal_plan_entry ----
+
+type updateMealPlanInput struct {
+	ID       int     `json:"id" jsonschema:"meal plan entry id (from get_meal_plan)"`
+	Date     *string `json:"date,omitempty" jsonschema:"new start date YYYY-MM-DD"`
+	EndDate  *string `json:"end_date,omitempty" jsonschema:"new end date YYYY-MM-DD"`
+	MealType *string `json:"meal_type,omitempty" jsonschema:"new meal type name"`
+	Recipe   *string `json:"recipe,omitempty" jsonschema:"new recipe name or id; empty string clears the recipe"`
+	Servings *int    `json:"servings,omitempty" jsonschema:"new servings"`
+	Title    *string `json:"title,omitempty" jsonschema:"new title; empty string clears it"`
+	Note     *string `json:"note,omitempty" jsonschema:"new free-text note; empty string clears it"`
+}
+
+func (h *handlers) updateMealPlanEntry(ctx context.Context, _ *mcp.CallToolRequest, in updateMealPlanInput) (*mcp.CallToolResult, any, error) {
+	if err := validatePositiveID("meal plan entry id", in.ID); err != nil {
+		return nil, nil, err
+	}
+	body := map[string]any{}
+	if in.Date != nil {
+		date, err := cleanRef("date", *in.Date)
+		if err != nil {
+			return nil, nil, fmt.Errorf("date is required (YYYY-MM-DD)")
+		}
+		body["from_date"] = toDateTime(date)
+	}
+	if in.EndDate != nil {
+		endDate, err := cleanRef("end_date", *in.EndDate)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["to_date"] = toDateTime(endDate)
+	}
+	if in.MealType != nil {
+		mealType, err := cleanName("meal_type", *in.MealType)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["meal_type"] = map[string]any{"name": mealType}
+	}
+	if in.Recipe != nil {
+		if strings.TrimSpace(*in.Recipe) == "" {
+			body["recipe"] = nil
+		} else {
+			id, err := h.resolveRecipe(ctx, *in.Recipe)
+			if err != nil {
+				return nil, nil, err
+			}
+			body["recipe"] = id
+		}
+	}
+	if in.Servings != nil {
+		if *in.Servings <= 0 {
+			return nil, nil, fmt.Errorf("servings must be positive")
+		}
+		body["servings"] = *in.Servings
+	}
+	if in.Title != nil {
+		title, err := cleanOptionalShortText("title", *in.Title)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["title"] = title
+	}
+	if in.Note != nil {
+		note, err := cleanOptionalFreeText("note", *in.Note)
+		if err != nil {
+			return nil, nil, err
+		}
+		body["note"] = note
+	}
+	if len(body) == 0 {
+		return nil, nil, fmt.Errorf("nothing to update: provide at least one field")
+	}
+	raw, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("meal-plan/%d/", in.ID), nil, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	var m apiMealPlan
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, nil, fmt.Errorf("decoding meal plan: %w", err)
+	}
+	return jsonResult(map[string]any{"status": "updated", "entry": toMealPlanCard(m)})
 }
 
 // ---- remove_meal_plan_entry ----

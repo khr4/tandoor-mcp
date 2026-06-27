@@ -266,7 +266,7 @@ func TestGenericDeleteConfirms(t *testing.T) {
 
 func TestGenericToolsDenyRestrictedResources(t *testing.T) {
 	h := newHandlers(t, &recorder{reply: `{"token":"secret"}`})
-	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config", "invite-link", "user", "space", "user-file", "view-log"} {
+	for _, res := range []string{"access-token", "storage", "ai-provider", "connector-config", "invite-link", "user", "space", "user-file", "view-log", "search-preference"} {
 		if _, _, err := h.genericGet(context.Background(), nil, getInput{Resource: res, ID: "1"}); err == nil {
 			t.Errorf("genericGet(%s) should be denied", res)
 		}

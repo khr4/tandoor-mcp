@@ -50,6 +50,20 @@ func (e apiShoppingEntry) line() string {
 	return formatIngredient(ing)
 }
 
+func toShoppingItem(e apiShoppingEntry) shoppingItem {
+	item := shoppingItem{ID: e.ID, Item: e.line(), Checked: e.Checked}
+	if !e.NoAmount {
+		item.Amount = e.Amount.String()
+	}
+	if e.Unit != nil {
+		item.Unit = e.Unit.Name
+	}
+	if e.Food != nil {
+		item.Food = e.Food.Name
+	}
+	return item
+}
+
 // shoppingEntries fetches shopping list entries, following pagination up to a
 // hard cap. truncated reports when more entries may exist beyond the cap.
 func (h *handlers) shoppingEntries(ctx context.Context) ([]apiShoppingEntry, bool, error) {
@@ -106,17 +120,7 @@ func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, 
 		if e.Checked && !includeChecked {
 			continue
 		}
-		item := shoppingItem{ID: e.ID, Item: e.line(), Checked: e.Checked}
-		if !e.NoAmount {
-			item.Amount = e.Amount.String()
-		}
-		if e.Unit != nil {
-			item.Unit = e.Unit.Name
-		}
-		if e.Food != nil {
-			item.Food = e.Food.Name
-		}
-		items = append(items, item)
+		items = append(items, toShoppingItem(e))
 	}
 	out := shoppingListOutput{Items: items, Truncated: truncated}
 	if truncated {
@@ -164,7 +168,7 @@ func (h *handlers) addToShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return nil, nil, fmt.Errorf("decoding created shopping entry: %w", err)
 	}
-	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": food})
+	return jsonResult(map[string]any{"status": "added", "id": created.ID, "item": food, "entry": toShoppingItem(created)})
 }
 
 // ---- add_recipe_to_shopping ----
@@ -205,19 +209,28 @@ func (h *handlers) updateShoppingItem(ctx context.Context, _ *mcp.CallToolReques
 		return nil, nil, err
 	}
 	body := map[string]any{}
+	var changed []string
 	if in.Checked != nil {
 		body["checked"] = *in.Checked
+		changed = append(changed, "checked")
 	}
 	if in.Amount != nil {
 		body["amount"] = *in.Amount
+		changed = append(changed, "amount")
 	}
 	if len(body) == 0 {
 		return nil, nil, fmt.Errorf("provide checked and/or amount")
 	}
-	if _, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("shopping-list-entry/%d/", in.ID), nil, body); err != nil {
+	raw, err := h.c.Do(ctx, http.MethodPatch, fmt.Sprintf("shopping-list-entry/%d/", in.ID), nil, body)
+	if err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"status": "updated", "id": in.ID})
+	out := map[string]any{"status": "updated", "id": in.ID, "changed_fields": changed}
+	var updated apiShoppingEntry
+	if err := json.Unmarshal(raw, &updated); err == nil && updated.ID != 0 {
+		out["entry"] = toShoppingItem(updated)
+	}
+	return jsonResult(out)
 }
 
 // ---- clear_shopping_list ----
@@ -238,26 +251,42 @@ func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 		return nil, nil, fmt.Errorf("refusing to clear shopping list after a partial scan of %d pages; use tandoor_list with explicit pagination", shoppingScanPages)
 	}
 	removed := 0
+	attempted := 0
+	skippedUnchecked := 0
+	var removedIDs []int
 	var failures []map[string]any
 	for _, e := range entries {
 		if onlyChecked && !e.Checked {
+			skippedUnchecked++
 			continue
 		}
+		attempted++
 		if ctx.Err() != nil {
-			failures = append(failures, failureObject(ctx.Err(), map[string]any{"id": e.ID}))
+			failures = append(failures, failureObject(ctx.Err(), map[string]any{"id": e.ID, "item": e.line(), "phase": "delete"}))
 			break
 		}
 		if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("shopping-list-entry/%d/", e.ID), nil, nil); err != nil {
-			failures = append(failures, failureObject(err, map[string]any{"id": e.ID}))
+			failures = append(failures, failureObject(err, map[string]any{"id": e.ID, "item": e.line(), "phase": "delete"}))
 			continue
 		}
 		removed++
+		removedIDs = append(removedIDs, e.ID)
 	}
 	scope := "all items"
 	if onlyChecked {
 		scope = "checked-off items"
 	}
-	out := map[string]any{"status": "cleared", "removed": removed, "scope": scope}
+	out := map[string]any{
+		"status":                "cleared",
+		"removed":               removed,
+		"scope":                 scope,
+		"attempted":             attempted,
+		"succeeded":             removed,
+		"failed":                len(failures),
+		"skipped_unchecked":     skippedUnchecked,
+		"removed_ids_sample":    sampleInts(removedIDs, maxResultIDSamples),
+		"removed_ids_truncated": len(removedIDs) > maxResultIDSamples,
+	}
 	if len(failures) > 0 {
 		out["status"] = "partial"
 		if hasFailureStatus(failures, "outcome_unknown") {
@@ -293,5 +322,11 @@ func (h *handlers) checkShoppingItems(ctx context.Context, _ *mcp.CallToolReques
 	if _, err := h.c.Do(ctx, http.MethodPost, "shopping-list-entry/bulk/", nil, body); err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"status": "updated", "count": len(in.IDs), "checked": checked})
+	return jsonResult(map[string]any{
+		"status":        "updated",
+		"count":         len(in.IDs),
+		"checked":       checked,
+		"ids_sample":    sampleInts(in.IDs, maxResultIDSamples),
+		"ids_truncated": len(in.IDs) > maxResultIDSamples,
+	})
 }

@@ -121,19 +121,22 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 	if _, exists, err := h.bookEntryID(ctx, recipeID, bookID); err != nil {
 		return nil, nil, err
 	} else if exists {
-		return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+		entryID, _, _ := h.bookEntryID(ctx, recipeID, bookID)
+		return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book, "book_name": book, "membership_id": entryID})
 	}
 	if _, err := h.c.Do(ctx, http.MethodPost, "recipe-book-entry/", nil, map[string]any{"book": bookID, "recipe": recipeID}); err != nil {
 		var apiErr *tandoor.APIError
 		var unknown *tandoor.OutcomeUnknownError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
 			if _, exists, lookupErr := h.bookEntryID(ctx, recipeID, bookID); lookupErr == nil && exists {
-				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+				entryID, _, _ := h.bookEntryID(ctx, recipeID, bookID)
+				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book, "book_name": book, "membership_id": entryID})
 			}
 		}
 		if errors.As(err, &unknown) {
 			if _, exists, lookupErr := h.bookEntryID(ctx, recipeID, bookID); lookupErr == nil && exists {
-				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+				entryID, _, _ := h.bookEntryID(ctx, recipeID, bookID)
+				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book, "book_name": book, "membership_id": entryID})
 			} else if lookupErr != nil {
 				return outcomeUnknownResult(unknown, map[string]any{"operation": "add_recipe_to_book", "recipe_id": recipeID, "book_id": bookID, "book": book, "membership_lookup_error": lookupErr.Error()})
 			}
@@ -141,7 +144,11 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 		}
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"status": "added", "recipe_id": recipeID, "book_id": bookID, "book": book})
+	entryID, _, err := h.bookEntryID(ctx, recipeID, bookID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"status": "added", "recipe_id": recipeID, "book_id": bookID, "book": book, "book_name": book, "membership_id": entryID})
 }
 
 // bookEntryID returns the id of the recipe's membership in a book, if present.
@@ -191,7 +198,7 @@ func (h *handlers) removeRecipeFromBook(ctx context.Context, _ *mcp.CallToolRequ
 	if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("recipe-book-entry/%d/", entryID), nil, nil); err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"status": "removed", "recipe_id": recipeID, "book_id": bookID})
+	return jsonResult(map[string]any{"status": "removed", "recipe_id": recipeID, "book_id": bookID, "membership_id": entryID})
 }
 
 // ---- list_recipe_books ----

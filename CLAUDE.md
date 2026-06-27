@@ -28,10 +28,13 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
   - **Designed tools** (the point of this server) — task-oriented, ergonomic for
     agents: name-based inputs, parsed quantities, compact/readable output.
     - `recipes.go` — find/get/create/import/update/image/related/log_cooked.
+    - `cooklog.go` — compact cook-history reads.
     - `planning.go` — `plan_meal`, `get_meal_plan`.
     - `shopping.go` — shopping list read/add/update/clear.
-    - `pantry.go` — `get_pantry`, `set_food_on_hand`.
-    - `taxonomy.go` — `list_taxonomy` / `merge_taxonomy` / `move_taxonomy` (kind-parameterized, names accepted).
+    - `pantry.go` / `inventory.go` — on-hand pantry flags and read-only
+      inventory entries.
+    - `taxonomy.go` — `list_taxonomy` / `create_taxonomy` / `rename_taxonomy`
+      / `merge_taxonomy` / `move_taxonomy` (kind-parameterized, names accepted).
     - `ingredients.go` — parse natural lines, build nested ingredient payloads
       with **explicit amount + unit** (never flattened into text).
     - `resolve.go` — resolve names to ids (find-existing / get-or-create).

@@ -137,6 +137,14 @@ func TestUpdateRecipeMergesKeywords(t *testing.T) {
 	if !strings.Contains(resultText(t, res), `"status": "updated"`) {
 		t.Errorf("result = %s", resultText(t, res))
 	}
+	out := structuredContentMap(t, res)
+	if out["edit_revision"] == "" || out["recipe_id"] != 5.0 {
+		t.Errorf("structuredContent = %v, want fresh edit_revision and recipe_id", out)
+	}
+	changed, ok := out["changed_fields"].([]any)
+	if !ok || len(changed) != 1 || changed[0] != "keywords" {
+		t.Errorf("changed_fields = %v, want keywords", out["changed_fields"])
+	}
 }
 
 func TestFindRecipesBuildsAllHighValueFilters(t *testing.T) {
@@ -157,7 +165,6 @@ func TestFindRecipesBuildsAllHighValueFilters(t *testing.T) {
 	minRating := 4
 	makeable := true
 	newest := true
-	random := true
 	limit := 7
 	if _, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{
 		Ingredients: []string{"Tomato"},
@@ -165,15 +172,25 @@ func TestFindRecipesBuildsAllHighValueFilters(t *testing.T) {
 		MinRating:   &minRating,
 		MakeableNow: &makeable,
 		Newest:      &newest,
-		Random:      &random,
 		Limit:       &limit,
 	}); err != nil {
 		t.Fatalf("findRecipes: %v", err)
 	}
-	for _, want := range []string{"foods_and=9", "books_and=4", "rating_gte=4", "makenow=true", "sort_order=-created_at", "random=true", "page_size=7"} {
+	for _, want := range []string{"foods_and=9", "books_and=4", "rating_gte=4", "makenow=true", "sort_order=-created_at", "page_size=7"} {
 		if !strings.Contains(recipeQuery, want) {
 			t.Errorf("query %q missing %q", recipeQuery, want)
 		}
+	}
+}
+
+func TestFindRecipesRejectsNewestAndRandom(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for mutually exclusive sort options")
+	})
+	newest := true
+	random := true
+	if _, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{Newest: &newest, Random: &random}); err == nil {
+		t.Fatal("expected newest/random rejection")
 	}
 }
 
@@ -208,7 +225,7 @@ func TestSetRecipeStepsPatchesSteps(t *testing.T) {
 			_, _ = io.WriteString(w, `{"id":5,"name":"X"}`)
 		}
 	})
-	_, _, err := h.setRecipeSteps(context.Background(), nil, setRecipeStepsInput{
+	res, _, err := h.setRecipeSteps(context.Background(), nil, setRecipeStepsInput{
 		Recipe: "5", ExpectedRevision: recipeRevision([]byte(recipeRaw)),
 		Steps: []stepInput{{Instruction: "season", Ingredients: []ingredientInput{{Text: "1 tsp salt"}}}},
 	})
@@ -217,6 +234,13 @@ func TestSetRecipeStepsPatchesSteps(t *testing.T) {
 	}
 	if at(t, patchBody, "steps") == nil {
 		t.Errorf("patch body missing steps: %v", patchBody)
+	}
+	out := structuredContentMap(t, res)
+	if out["edit_revision"] == "" || out["recipe_id"] != 5.0 {
+		t.Errorf("structuredContent = %v, want edit_revision and recipe_id", out)
+	}
+	if _, ok := out["steps"]; !ok {
+		t.Errorf("structuredContent = %v, want updated steps for chaining", out)
 	}
 }
 
@@ -818,11 +842,14 @@ func TestClearShoppingListAggregatesErrors(t *testing.T) {
 	if out["removed"] != 1.0 || out["status"] != "partial_outcome_unknown" {
 		t.Errorf("out = %v, want removed 1 partial_outcome_unknown", out)
 	}
+	if out["attempted"] != 2.0 || out["skipped_unchecked"] != 1.0 || out["failed"] != 1.0 {
+		t.Errorf("out = %v, want attempted/skipped/failed counts", out)
+	}
 	if !res.IsError {
 		t.Error("partial clear should be an MCP error result")
 	}
 	failures, ok := out["failures"].([]any)
-	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "id") != 2.0 {
+	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "id") != 2.0 || at(t, failures[0], "phase") != "delete" {
 		t.Fatalf("failures = %v, want structured outcome_unknown for entry 2", out["failures"])
 	}
 	if !deleted["/api/shopping-list-entry/1/"] {
@@ -861,7 +888,7 @@ func TestSetFoodOnHandPartialIsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	failures, ok := out["failures"].([]any)
-	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "food") != "flour" {
+	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "food") != "flour" || at(t, failures[0], "food_id") != 2.0 || at(t, failures[0], "phase") != "patch_on_hand" {
 		t.Fatalf("failures = %v, want structured outcome_unknown for flour", out["failures"])
 	}
 }
@@ -914,7 +941,7 @@ func TestListTaxonomyAndBadKind(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `[{"id":1,"name":"gram"}]`)
 	})
-	res, _, err := h.listTaxonomy(context.Background(), nil, listTaxonomyInput{Kind: "unit"})
+	res, _, err := h.listTaxonomy(context.Background(), nil, listTaxonomyInput{Kind: "units"})
 	if err != nil {
 		t.Fatalf("listTaxonomy: %v", err)
 	}
@@ -928,8 +955,105 @@ func TestListTaxonomyAndBadKind(t *testing.T) {
 	if _, ok := out["items"]; !ok {
 		t.Fatalf("structuredContent = %v, want items envelope", out)
 	}
+	if out["returned"] != 1.0 || out["limit"] != 50.0 {
+		t.Fatalf("structuredContent = %v, want returned/limit metadata", out)
+	}
 	if _, _, err := h.listTaxonomy(context.Background(), nil, listTaxonomyInput{Kind: "bogus"}); err == nil {
 		t.Error("expected error for bad kind")
+	}
+}
+
+func TestCreateAndRenameTaxonomy(t *testing.T) {
+	var requests []string
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/food/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":7,"name":"Vegetables"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/food/":
+			body := decodeBody(t, r)
+			if at(t, body, "name") != "Carrot" || at(t, body, "plural_name") != "Carrots" {
+				t.Fatalf("create body = %v", body)
+			}
+			_, _ = io.WriteString(w, `{"id":9,"name":"Carrot","plural_name":"Carrots"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/api/food/9/move/7/":
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/unit/3/":
+			body := decodeBody(t, r)
+			if at(t, body, "name") != "gramme" {
+				t.Fatalf("rename body = %v", body)
+			}
+			_, _ = io.WriteString(w, `{"id":3,"name":"gramme","plural_name":"grammes"}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	res, _, err := h.createTaxonomy(context.Background(), nil, createTaxonomyInput{Kind: "food", Name: "Carrot", PluralName: "Carrots", Parent: "Vegetables"})
+	if err != nil {
+		t.Fatalf("createTaxonomy: %v", err)
+	}
+	if out := structuredContentMap(t, res); at(t, out, "item", "parent_id") != 7.0 {
+		t.Fatalf("create output = %v, want parent id", out)
+	}
+	name := "gramme"
+	res, _, err = h.renameTaxonomy(context.Background(), nil, renameTaxonomyInput{Kind: "unit", Item: "3", Name: &name})
+	if err != nil {
+		t.Fatalf("renameTaxonomy: %v", err)
+	}
+	if out := structuredContentMap(t, res); at(t, out, "item", "name") != "gramme" {
+		t.Fatalf("rename output = %v", out)
+	}
+	if len(requests) != 4 {
+		t.Fatalf("requests = %v", requests)
+	}
+}
+
+func TestGetInventoryFiltersAndCompactsEntries(t *testing.T) {
+	var query string
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/food/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":8,"name":"Flour"}]}`)
+		case "/api/inventory-entry/":
+			query = r.URL.RawQuery
+			_, _ = io.WriteString(w, `{"count":1,"next":null,"results":[{"id":4,"amount":"2.5","food":{"id":8,"name":"Flour"},"unit":{"id":2,"name":"kg"},"inventory_location":{"id":3,"name":"Pantry"},"expires":"2026-07-01","note":"sealed","label":"#4 - 2.5 kg Flour"}]}`)
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	})
+	includeEmpty := true
+	res, _, err := h.getInventory(context.Background(), nil, getInventoryInput{Food: "Flour", IncludeEmpty: &includeEmpty})
+	if err != nil {
+		t.Fatalf("getInventory: %v", err)
+	}
+	if !strings.Contains(query, "food_id=8") || !strings.Contains(query, "empty=true") {
+		t.Fatalf("query = %q, want food_id and empty", query)
+	}
+	out := structuredContentMap(t, res)
+	if out["returned"] != 1.0 || at(t, idx(t, out["entries"], 0), "food") != "Flour" {
+		t.Fatalf("inventory output = %v", out)
+	}
+}
+
+func TestGetCookLogFiltersAndResolvesRecipeNames(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/cook-log/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":1,"recipe":5,"rating":4,"servings":2,"comment":"good","created_at":"2026-06-01T12:00:00Z"},{"id":2,"recipe":6,"rating":2,"created_at":"2026-06-02T12:00:00Z"}]}`)
+		case "/api/recipe/5/":
+			_, _ = io.WriteString(w, `{"id":5,"name":"Chili"}`)
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	})
+	minRating := 3
+	res, _, err := h.getCookLog(context.Background(), nil, getCookLogInput{MinRating: &minRating, From: "2026-06-01", To: "2026-06-30"})
+	if err != nil {
+		t.Fatalf("getCookLog: %v", err)
+	}
+	out := structuredContentMap(t, res)
+	if at(t, idx(t, out["logs"], 0), "recipe") != "Chili" || at(t, out, "summary", "count") != 1.0 {
+		t.Fatalf("cook log output = %v", out)
 	}
 }
 
