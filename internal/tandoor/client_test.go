@@ -3,6 +3,7 @@ package tandoor
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log"
@@ -41,6 +42,9 @@ func TestInsecureTransportKeepsHTTP2AndProxy(t *testing.T) {
 	}
 	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify not set on the insecure transport")
+	}
+	if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion = %#x, want TLS 1.2: refuse downgraded TLS even when not verifying", tr.TLSClientConfig.MinVersion)
 	}
 	// The bug: a bare Transport with a custom TLSClientConfig drops these.
 	if !tr.ForceAttemptHTTP2 {

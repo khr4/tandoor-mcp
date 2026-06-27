@@ -2,7 +2,8 @@
 // Recipes REST API. By default it speaks MCP over stdio; setting
 // TANDOOR_HTTP_ADDR switches it to the network transport (Streamable HTTP +
 // SSE, with HTTP/2). It is configured entirely through environment variables
-// (see tandoor.ConfigFromEnv, TANDOOR_IMAGE_DIR and the TANDOOR_HTTP_* vars).
+// (see tandoor.ConfigFromEnv, TANDOOR_IMAGE_DIR, and the TANDOOR_HTTP_ADDR /
+// TANDOOR_MCP_TOKEN / TANDOOR_TLS_CERT / TANDOOR_TLS_KEY transport vars).
 package main
 
 import (
@@ -39,7 +40,7 @@ func main() {
 	srv := server.New(client, opts)
 
 	if addr := strings.TrimSpace(os.Getenv("TANDOOR_HTTP_ADDR")); addr != "" {
-		err = server.ServeHTTP(ctx, srv, server.HTTPOptions{
+		err = server.Serve(ctx, srv, server.HTTPOptions{
 			Addr:    addr,
 			Token:   strings.TrimSpace(os.Getenv("TANDOOR_MCP_TOKEN")),
 			TLSCert: strings.TrimSpace(os.Getenv("TANDOOR_TLS_CERT")),

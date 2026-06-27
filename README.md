@@ -44,12 +44,20 @@ per-client launch (`.mcp.json` / `claude_desktop_config.json`). Set
 The HTTP transport exposes the modern **Streamable HTTP** transport at `/mcp`
 (request/response plus SSE streaming), the legacy **SSE** transport at `/sse`,
 and an unauthenticated `/healthz`. HTTP/1.1 and HTTP/2 are both served (h2 over
-TLS, h2c in cleartext). The SDK's DNS-rebinding protection is on by default.
+TLS, h2c in cleartext).
+
+**Behind a reverse proxy** (the common case): bind loopback and let the proxy on
+the same host terminate TLS. The bearer token is the trust boundary, so the SDK's
+DNS-rebinding protection (which would otherwise 403 a forwarded public `Host`) is
+disabled automatically when a token is set; for a token-less loopback dev server
+it stays on. A non-loopback bind requires a token, and a non-loopback *cleartext*
+bind is allowed but warns (the token would travel in plaintext) — front it with
+TLS instead.
 
 ```sh
-# network transport with a bearer token, cleartext h2c + http/1.1
+# behind a same-host reverse proxy (TLS terminated at the edge)
 TANDOOR_URL=https://recipes.example.com TANDOOR_TOKEN=xxxx \
-TANDOOR_HTTP_ADDR=:8080 TANDOOR_MCP_TOKEN=$(openssl rand -hex 32) ./tandoor-mcp
+TANDOOR_HTTP_ADDR=127.0.0.1:8080 TANDOOR_MCP_TOKEN=$(openssl rand -hex 32) ./tandoor-mcp
 ```
 
 ## Run

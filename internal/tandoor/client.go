@@ -109,7 +109,10 @@ func New(cfg Config) (*Client, error) {
 		// connection-pool/dial timeouts survive. A hand-built Transport with a
 		// custom TLSClientConfig silently disables all three.
 		tr := http.DefaultTransport.(*http.Transport).Clone()
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in via TANDOOR_INSECURE_SKIP_VERIFY
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,             //nolint:gosec // opt-in via TANDOOR_INSECURE_SKIP_VERIFY
+			MinVersion:         tls.VersionTLS12, // still refuse downgraded TLS even when not verifying the cert
+		}
 		hc.Transport = tr
 	}
 	return &Client{base: base, token: cfg.Token, http: hc}, nil

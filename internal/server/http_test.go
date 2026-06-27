@@ -2,12 +2,23 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -51,7 +62,7 @@ func mcpServer(t *testing.T, backend http.HandlerFunc) *mcp.Server {
 }
 
 func TestHTTPAuthGate(t *testing.T) {
-	front := httptest.NewServer(NewHTTPHandler(mcpServer(t, nil), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
 	t.Cleanup(front.Close)
 
 	// /healthz is unauthenticated.
@@ -96,13 +107,13 @@ func TestServeHTTPFailsClosed(t *testing.T) {
 	srv := mcpServer(t, nil)
 
 	// Non-loopback bind without a token must be refused before any listener opens.
-	err := ServeHTTP(context.Background(), srv, HTTPOptions{Addr: "0.0.0.0:0", Token: ""})
+	err := Serve(context.Background(), srv, HTTPOptions{Addr: "0.0.0.0:0", Token: ""})
 	if err == nil || !strings.Contains(err.Error(), "token") {
 		t.Errorf("non-loopback without token: err = %v, want a token-related refusal", err)
 	}
 
 	// A half-configured TLS pair is rejected.
-	err = ServeHTTP(context.Background(), srv, HTTPOptions{Addr: "127.0.0.1:0", TLSCert: "cert.pem"})
+	err = Serve(context.Background(), srv, HTTPOptions{Addr: "127.0.0.1:0", TLSCert: "cert.pem"})
 	if err == nil || !strings.Contains(err.Error(), "TLS") {
 		t.Errorf("TLS cert without key: err = %v, want a TLS pairing error", err)
 	}
@@ -164,7 +175,7 @@ func recipeBackend(w http.ResponseWriter, _ *http.Request) {
 }
 
 func TestEndToEndStreamableOverHTTP(t *testing.T) {
-	front := httptest.NewServer(NewHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
 	t.Cleanup(front.Close)
 	roundTripTools(t, &mcp.StreamableClientTransport{
 		Endpoint:   front.URL + "/mcp",
@@ -173,7 +184,7 @@ func TestEndToEndStreamableOverHTTP(t *testing.T) {
 }
 
 func TestEndToEndSSEOverHTTP(t *testing.T) {
-	front := httptest.NewServer(NewHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
 	t.Cleanup(front.Close)
 	roundTripTools(t, &mcp.SSEClientTransport{
 		Endpoint:   front.URL + "/sse",
@@ -182,7 +193,7 @@ func TestEndToEndSSEOverHTTP(t *testing.T) {
 }
 
 func TestEndToEndStreamableRejectsBadToken(t *testing.T) {
-	front := httptest.NewServer(NewHTTPHandler(mcpServer(t, recipeBackend), "secret"))
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, recipeBackend), "secret"))
 	t.Cleanup(front.Close)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:   front.URL + "/mcp",
@@ -231,19 +242,218 @@ func TestH2CCleartextRoundTrip(t *testing.T) {
 	}
 }
 
-// TestH2OverTLS proves HTTP/2 is negotiated over TLS via ALPN through the handler.
-func TestH2OverTLS(t *testing.T) {
-	s := httptest.NewUnstartedServer(NewHTTPHandler(mcpServer(t, nil), ""))
-	s.EnableHTTP2 = true
-	s.StartTLS()
-	t.Cleanup(s.Close)
+// writeSelfSignedCert writes a throwaway cert/key pair valid for 127.0.0.1 and
+// returns their paths, so tests can drive the real ServeTLS path.
+func writeSelfSignedCert(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
 
-	resp, err := s.Client().Get(s.URL + "/healthz")
+// TestH2OverTLSServeListener drives the real serveListener ServeTLS path and
+// proves HTTP/2 is negotiated over TLS via ALPN, then that shutdown is graceful.
+func TestH2OverTLSServeListener(t *testing.T) {
+	certPath, keyPath := writeSelfSignedCert(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveListener(ctx, mcpServer(t, nil), HTTPOptions{
+			Addr: ln.Addr().String(), Token: "secret", TLSCert: certPath, TLSKey: keyPath,
+		}, ln)
+	}()
+
+	// A client with a custom TLS config must also force HTTP/2 (same gotcha the
+	// production client fix addresses) to negotiate h2 via ALPN.
+	tr := &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // throwaway self-signed cert
+		ForceAttemptHTTP2: true,
+	}
+	client := &http.Client{Transport: tr}
+	resp, err := client.Get("https://" + ln.Addr().String() + "/healthz")
 	if err != nil {
 		t.Fatalf("TLS GET: %v", err)
 	}
 	resp.Body.Close()
 	if resp.ProtoMajor != 2 {
-		t.Errorf("ProtoMajor = %d, want 2 (h2 over TLS/ALPN)", resp.ProtoMajor)
+		t.Errorf("ProtoMajor = %d, want 2 (h2 over TLS/ALPN, real ServeTLS path)", resp.ProtoMajor)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("serveListener returned %v on shutdown, want nil", err)
+	}
+}
+
+// TestServeHappyPath covers Serve's loopback-no-token path end to end: it binds,
+// logs the warning, serves, and shuts down cleanly on context cancel.
+func TestServeHappyPath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, mcpServer(t, nil), HTTPOptions{Addr: "127.0.0.1:0"}) }()
+	// Give Serve a moment to bind, then cancel and require a clean return.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Serve returned %v, want nil on shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return within 5s of cancel")
+	}
+}
+
+// TestServeBindFailureSurfaces checks that a failed bind is surfaced (not
+// swallowed) with the address named.
+func TestServeBindFailureSurfaces(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// Binding the already-taken loopback address must fail loudly.
+	err = Serve(context.Background(), mcpServer(t, nil), HTTPOptions{Addr: ln.Addr().String()})
+	if err == nil || !strings.Contains(err.Error(), ln.Addr().String()) {
+		t.Errorf("Serve on a busy address: err = %v, want a listen error naming %s", err, ln.Addr().String())
+	}
+}
+
+// TestRebindProtectionDisabledWithToken proves the reverse-proxy deployment
+// works: a request arriving on loopback with a non-loopback Host header and a
+// valid bearer is NOT rejected (403) by the SDK's DNS-rebinding guard.
+func TestRebindProtectionDisabledWithToken(t *testing.T) {
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
+	t.Cleanup(front.Close)
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	req.Host = "recipes.example.com" // a same-host proxy would forward this
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("got 403: DNS-rebinding guard still rejects a proxied Host with a valid token")
+	}
+}
+
+// TestRebindProtectionOnWithoutToken keeps the guard for the unauthenticated
+// loopback case: a non-loopback Host must be rejected.
+func TestRebindProtectionOnWithoutToken(t *testing.T) {
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), ""))
+	t.Cleanup(front.Close)
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Host = "evil.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (DNS-rebinding guard must stay on without a token)", resp.StatusCode)
+	}
+}
+
+// TestBearerSchemeCaseInsensitive checks RFC 7235 case-insensitive scheme
+// matching, while a wrong token is still rejected.
+func TestBearerSchemeCaseInsensitive(t *testing.T) {
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret"))
+	t.Cleanup(front.Close)
+	do := func(authz string) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/mcp", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", authz)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := do("bearer secret"); got == http.StatusUnauthorized {
+		t.Error("lowercase \"bearer\" scheme was rejected; should match case-insensitively")
+	}
+	if got := do("Bearer nope"); got != http.StatusUnauthorized {
+		t.Errorf("wrong token status = %d, want 401", got)
+	}
+}
+
+// TestGracefulShutdownWithActiveSSEStream is the regression guard for the
+// load-bearing BaseContext=ctx wiring: an in-flight SSE session must unwind on
+// shutdown so Serve returns nil well before the 10s drain timeout.
+func TestGracefulShutdownWithActiveSSEStream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveListener(ctx, mcpServer(t, recipeBackend), HTTPOptions{Addr: ln.Addr().String(), Token: "secret"}, ln)
+	}()
+
+	// Establish a live SSE session and keep it open.
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil).Connect(
+		context.Background(),
+		&mcp.SSEClientTransport{Endpoint: "http://" + ln.Addr().String() + "/sse", HTTPClient: bearerClient("secret")},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("connect SSE: %v", err)
+	}
+	if _, err := cs.ListTools(context.Background(), nil); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	start := time.Now()
+	cancel() // shut down with the SSE stream still connected
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serveListener returned %v with an active stream, want nil", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("shutdown took %v (≈the %v drain timeout): the in-flight stream did not unwind via ctx", elapsed, httpShutdownTimeout)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("serveListener did not return within 8s; shutdown hung on the active stream")
 	}
 }
