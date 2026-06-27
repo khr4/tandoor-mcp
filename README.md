@@ -118,7 +118,7 @@ Meal planning, shopping, pantry, taxonomy:
 | `add_recipe_to_shopping` | Add a recipe's ingredients (optionally scaled). |
 | `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. Clear refuses to run if the shopping list scan is truncated. |
 | `check_shopping_items` | Check or uncheck many entries at once (incl. uncheck-all). |
-| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand. Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos. |
+| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand (pass `foods[]` to stock several at once). Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos. |
 | `list_taxonomy` | List keywords, foods or units (`kind`) with ids. |
 | `merge_taxonomy` / `move_taxonomy` | Merge or re-parent a keyword/food/unit (by name or id). |
 

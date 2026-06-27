@@ -35,7 +35,7 @@ func (h *handlers) resolveTaxonomyID(ctx context.Context, kind, ref string) (int
 		return 0, err
 	}
 	if !found {
-		return 0, fmt.Errorf("%s %q not found", kind, ref)
+		return 0, fmt.Errorf("%s %q not found — use list_taxonomy with kind=%q to see existing names", kind, ref, kind)
 	}
 	return id, nil
 }

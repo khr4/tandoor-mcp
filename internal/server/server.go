@@ -120,7 +120,7 @@ func (h *handlers) register(s *mcp.Server) {
 
 	// Pantry / on-hand.
 	mcp.AddTool(s, &mcp.Tool{Name: "get_pantry", Description: "List foods currently marked on-hand (in the pantry)."}, h.getPantry)
-	mcp.AddTool(s, &mcp.Tool{Name: "set_food_on_hand", Description: "Mark a food as on-hand (in the pantry) or clear it. Used by makeable_now searches."}, h.setFoodOnHand)
+	mcp.AddTool(s, &mcp.Tool{Name: "set_food_on_hand", Description: "Mark one or more foods as on-hand (in the pantry) or clear them — pass food for one, or foods[] to stock several in one call. Used by makeable_now searches."}, h.setFoodOnHand)
 
 	// Taxonomy (keywords / foods / units).
 	mcp.AddTool(s, &mcp.Tool{Name: "list_taxonomy", Description: "List keywords, foods or units (id + name) for a given kind, optionally filtered by name."}, h.listTaxonomy)

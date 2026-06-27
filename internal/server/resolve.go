@@ -155,7 +155,7 @@ func (h *handlers) resolveRequiredIDs(ctx context.Context, resourcePath, kind st
 		case err != nil:
 			return nil, err
 		case !found:
-			return nil, fmt.Errorf("%s %q not found", kind, n)
+			return nil, fmt.Errorf("%s %q not found — check the spelling or use list_taxonomy to see existing names", kind, n)
 		default:
 			ids = append(ids, id)
 		}
@@ -180,7 +180,7 @@ func (h *handlers) resolveRecipe(ctx context.Context, ref string) (int, error) {
 	}
 	switch len(ids) {
 	case 0:
-		return 0, fmt.Errorf("recipe %q not found", ref)
+		return 0, fmt.Errorf("recipe %q not found — search with find_recipes to get the exact name or id", ref)
 	case 1:
 		return ids[0], nil
 	default:

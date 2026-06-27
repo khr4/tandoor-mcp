@@ -177,11 +177,12 @@ type createRecipeInput struct {
 }
 
 type createRecipeOutput struct {
-	ID       int      `json:"id"`
-	Name     string   `json:"name"`
-	Status   string   `json:"status"`
-	Steps    int      `json:"steps"`
-	Keywords []string `json:"keywords,omitempty"`
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	Status      string   `json:"status"`
+	Steps       int      `json:"steps"`
+	Keywords    []string `json:"keywords,omitempty"`
+	Ingredients []string `json:"ingredients,omitempty"` // as stored, for quantity verification without a get_recipe round-trip
 }
 
 // createRecipe creates a recipe, splitting quantities out of natural-language
@@ -227,9 +228,18 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return nil, nil, fmt.Errorf("decoding created recipe: %w", err)
 	}
+	var ingredients []string
+	for _, st := range created.Steps {
+		for _, ing := range st.Ingredients {
+			if line := formatIngredient(ing); line != "" {
+				ingredients = append(ingredients, line)
+			}
+		}
+	}
 	return jsonResult(createRecipeOutput{
 		ID: created.ID, Name: created.Name, Status: "created",
 		Steps: len(created.Steps), Keywords: keywordNames(created.Keywords),
+		Ingredients: ingredients,
 	})
 }
 
