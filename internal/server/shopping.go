@@ -222,3 +222,25 @@ func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	return jsonResult(out)
 }
+
+// ---- check_shopping_items ----
+
+type checkShoppingInput struct {
+	IDs     []int `json:"ids" jsonschema:"shopping list entry ids to update (from get_shopping_list)"`
+	Checked *bool `json:"checked,omitempty" jsonschema:"mark bought (true, default) or not bought (false)"`
+}
+
+// checkShoppingItems checks or unchecks many entries in one call via Tandoor's
+// bulk endpoint. To uncheck everything, read get_shopping_list with
+// include_checked=true, then pass all ids with checked=false.
+func (h *handlers) checkShoppingItems(ctx context.Context, _ *mcp.CallToolRequest, in checkShoppingInput) (*mcp.CallToolResult, any, error) {
+	if len(in.IDs) == 0 {
+		return nil, nil, fmt.Errorf("ids is required")
+	}
+	checked := in.Checked == nil || *in.Checked
+	body := map[string]any{"ids": in.IDs, "checked": checked}
+	if _, err := h.c.Do(ctx, http.MethodPost, "shopping-list-entry/bulk/", nil, body); err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"status": "updated", "count": len(in.IDs), "checked": checked})
+}

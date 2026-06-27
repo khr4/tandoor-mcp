@@ -61,6 +61,8 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 		"tandoor_resources", "tandoor_list", "tandoor_action",
 		"find_recipes", "create_recipe", "import_recipe_from_url", "delete_recipe",
 		"plan_meal", "get_shopping_list", "set_food_on_hand", "merge_taxonomy",
+		"add_recipe_to_book", "remove_recipe_from_book", "list_recipe_books",
+		"check_shopping_items",
 	} {
 		if !names[want] {
 			t.Errorf("tool %q not registered (have %d tools)", want, len(tools.Tools))
@@ -100,6 +102,33 @@ func TestEndToEndInputValidation(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Errorf("expected IsError for missing required fields, got: %s", toolText(res))
+	}
+}
+
+func TestEndToEndCheckShoppingItems(t *testing.T) {
+	ctx := context.Background()
+	var gotPath string
+	var gotBody []byte
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "check_shopping_items",
+		Arguments: map[string]any{"ids": []int{4, 5}, "checked": false},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("call errored: %s", toolText(res))
+	}
+	if gotPath != "/api/shopping-list-entry/bulk/" {
+		t.Errorf("backend path = %q, want /api/shopping-list-entry/bulk/", gotPath)
+	}
+	if !strings.Contains(string(gotBody), `"checked":false`) || !strings.Contains(string(gotBody), `"ids":[4,5]`) {
+		t.Errorf("backend body = %s", gotBody)
 	}
 }
 

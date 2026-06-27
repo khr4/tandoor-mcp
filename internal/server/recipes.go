@@ -108,16 +108,18 @@ type getRecipeInput struct {
 }
 
 type getRecipeOutput struct {
-	ID             int       `json:"id"`
-	Name           string    `json:"name"`
-	Rating         string    `json:"rating,omitempty"`
-	Servings       string    `json:"servings,omitempty"`
-	WorkingTimeMin string    `json:"working_time_min,omitempty"`
-	WaitingTimeMin string    `json:"waiting_time_min,omitempty"`
-	Keywords       []string  `json:"keywords,omitempty"`
-	SourceURL      string    `json:"source_url,omitempty"`
-	Steps          []stepOut `json:"steps"`
-	Markdown       string    `json:"markdown"`
+	ID             int           `json:"id"`
+	Name           string        `json:"name"`
+	Rating         string        `json:"rating,omitempty"`
+	Servings       string        `json:"servings,omitempty"`
+	WorkingTimeMin string        `json:"working_time_min,omitempty"`
+	WaitingTimeMin string        `json:"waiting_time_min,omitempty"`
+	Keywords       []string      `json:"keywords,omitempty"`
+	SourceURL      string        `json:"source_url,omitempty"`
+	Nutrition      *nutritionOut `json:"nutrition,omitempty"`
+	Properties     []propertyOut `json:"properties,omitempty"`
+	Steps          []stepOut     `json:"steps"`
+	Markdown       string        `json:"markdown"`
 }
 
 // getRecipe returns one recipe as structured fields plus a readable Markdown view.
@@ -142,6 +144,9 @@ func (h *handlers) getRecipe(ctx context.Context, _ *mcp.CallToolRequest, in get
 		ID: r.ID, Name: r.Name, Rating: r.Rating.String(), Servings: r.Servings.String(),
 		WorkingTimeMin: r.WorkingTime.String(), WaitingTimeMin: r.WaitingTime.String(),
 		Keywords: keywordNames(r.Keywords), SourceURL: r.SourceURL,
+		// Nutrition is shown as stored, never re-scaled: its basis (per-recipe vs
+		// per-serving) is configuration-dependent, so scaling it would mislead.
+		Nutrition: toNutrition(r), Properties: toProperties(r),
 		Steps: toStepOuts(r), Markdown: renderRecipe(r),
 	})
 }

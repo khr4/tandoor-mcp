@@ -762,3 +762,133 @@ func TestMergeTaxonomyResolvesNames(t *testing.T) {
 		t.Errorf("path = %s, want /api/keyword/3/merge/4/", path)
 	}
 }
+
+// ---- get_recipe nutrition ----
+
+func TestGetRecipeSurfacesNutrition(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/recipe/7/" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"id":7,"name":"Soup","servings":2,
+			"nutrition":{"calories":"250.00","carbohydrates":"30","fats":"8","proteins":"12","source":"label"},
+			"properties":[{"property_amount":"3.5","property_type":{"name":"Fiber","unit":"g"}}],
+			"steps":[]}`)
+	})
+	res, _, err := h.getRecipe(context.Background(), nil, getRecipeInput{Recipe: "7"})
+	if err != nil {
+		t.Fatalf("getRecipe: %v", err)
+	}
+	var out getRecipeOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Nutrition == nil {
+		t.Fatalf("nutrition missing: %s", resultText(t, res))
+	}
+	if out.Nutrition.Calories != "250" || out.Nutrition.Carbohydrates != "30" || out.Nutrition.Source != "label" {
+		t.Errorf("nutrition = %+v", out.Nutrition)
+	}
+	if len(out.Properties) != 1 || out.Properties[0].Name != "Fiber" || out.Properties[0].Amount != "3.5" || out.Properties[0].Unit != "g" {
+		t.Errorf("properties = %+v", out.Properties)
+	}
+}
+
+func TestGetRecipeOmitsAbsentNutrition(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":8,"name":"Plain","servings":1,"steps":[]}`)
+	})
+	res, _, err := h.getRecipe(context.Background(), nil, getRecipeInput{Recipe: "8"})
+	if err != nil {
+		t.Fatalf("getRecipe: %v", err)
+	}
+	var out getRecipeOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Nutrition != nil {
+		t.Errorf("nutrition = %+v, want nil when absent", out.Nutrition)
+	}
+	if len(out.Properties) != 0 {
+		t.Errorf("properties = %+v, want empty when absent", out.Properties)
+	}
+}
+
+func TestGetRecipeScalesAmountsButNotNutrition(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":7,"name":"Soup","servings":2,
+			"nutrition":{"calories":"250"},
+			"steps":[{"instruction":"boil","ingredients":[{"amount":2,"food":{"name":"water"},"unit":{"name":"cup"},"no_amount":false}]}]}`)
+	})
+	four := 4
+	res, _, err := h.getRecipe(context.Background(), nil, getRecipeInput{Recipe: "7", Servings: &four})
+	if err != nil {
+		t.Fatalf("getRecipe: %v", err)
+	}
+	var out getRecipeOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Servings != "4" {
+		t.Errorf("servings = %q, want 4", out.Servings)
+	}
+	amt := out.Steps[0].Ingredients[0].Amount
+	if amt == nil || *amt != 4 {
+		t.Errorf("ingredient amount = %v, want 4 (scaled 2->4)", amt)
+	}
+	if out.Nutrition == nil || out.Nutrition.Calories != "250" {
+		t.Errorf("nutrition = %+v, want calories unchanged at 250 (not scaled)", out.Nutrition)
+	}
+}
+
+// ---- check_shopping_items (bulk) ----
+
+func TestCheckShoppingItemsBulk(t *testing.T) {
+	var body map[string]any
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/shopping-list-entry/bulk/" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		body = decodeBody(t, r)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	res, _, err := h.checkShoppingItems(context.Background(), nil, checkShoppingInput{IDs: []int{1, 2, 3}})
+	if err != nil {
+		t.Fatalf("checkShoppingItems: %v", err)
+	}
+	ids, ok := body["ids"].([]any)
+	if !ok || len(ids) != 3 || idx(t, at(t, body, "ids"), 0) != 1.0 {
+		t.Errorf("ids = %v, want [1 2 3]", body["ids"])
+	}
+	if at(t, body, "checked") != true {
+		t.Errorf("checked = %v, want true (default)", at(t, body, "checked"))
+	}
+	if !strings.Contains(resultText(t, res), `"count": 3`) {
+		t.Errorf("result = %s", resultText(t, res))
+	}
+}
+
+func TestCheckShoppingItemsUncheck(t *testing.T) {
+	var body map[string]any
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		body = decodeBody(t, r)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	no := false
+	_, _, err := h.checkShoppingItems(context.Background(), nil, checkShoppingInput{IDs: []int{9}, Checked: &no})
+	if err != nil {
+		t.Fatalf("checkShoppingItems: %v", err)
+	}
+	if at(t, body, "checked") != false {
+		t.Errorf("checked = %v, want false (uncheck)", at(t, body, "checked"))
+	}
+}
+
+func TestCheckShoppingItemsRequiresIDs(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("must not call backend with no ids")
+	})
+	if _, _, err := h.checkShoppingItems(context.Background(), nil, checkShoppingInput{}); err == nil {
+		t.Error("expected error for empty ids")
+	}
+}

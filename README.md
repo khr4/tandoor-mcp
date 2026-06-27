@@ -61,7 +61,7 @@ Recipes — every recipe argument accepts a **name or id**:
 | Tool | Purpose |
 |---|---|
 | `find_recipes` | Search by words, keyword/ingredient **names** (match ALL), book, rating, or makeable-now. Returns compact cards. |
-| `get_recipe` | One recipe as structured fields, an editable `steps[]` array, and a Markdown view; optional `servings` re-scales amounts. |
+| `get_recipe` | One recipe as structured fields, an editable `steps[]` array, stored nutrition/properties (when set), and a Markdown view; optional `servings` re-scales amounts (not nutrition). |
 | `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`; top-level `ingredients` for simple recipes or `steps[]` for multi-step. Foods/units/keywords created by name. |
 | `import_recipe_from_url` | Scrape a web page and save it (`save=false` for a preview). |
 | `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. |
@@ -70,6 +70,7 @@ Recipes — every recipe argument accepts a **name or id**:
 | `set_recipe_image` | Set an image from a remote URL, or a local file within `TANDOOR_IMAGE_DIR`. |
 | `find_related_recipes` | Recipes sharing keywords/foods. |
 | `log_cooked` | Record a cook + rating (how recipes get rated). |
+| `add_recipe_to_book` / `remove_recipe_from_book` / `list_recipe_books` | Organize recipes into books (book created on first add). Filter by book with `find_recipes`. |
 
 Meal planning, shopping, pantry, taxonomy:
 
@@ -80,6 +81,7 @@ Meal planning, shopping, pantry, taxonomy:
 | `add_to_shopping_list` | Add an ad-hoc food with amount + unit. |
 | `add_recipe_to_shopping` | Add a recipe's ingredients (optionally scaled). |
 | `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. |
+| `check_shopping_items` | Check or uncheck many entries at once (incl. uncheck-all). |
 | `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand. |
 | `list_taxonomy` | List keywords, foods or units (`kind`) with ids. |
 | `merge_taxonomy` / `move_taxonomy` | Merge or re-parent a keyword/food/unit (by name or id). |
@@ -94,6 +96,10 @@ endpoint, for cases the designed tools don't cover:
 
 `tandoor_resources`, `tandoor_list`, `tandoor_get`, `tandoor_create`,
 `tandoor_update`, `tandoor_delete`, `tandoor_action`.
+
+A few capabilities live only here by design: recipe **export** (`/api-export/` is
+asynchronous — create the job, then poll `export-log`) and **share links** stay on
+the escape hatch rather than as designed tools.
 
 ## Development
 

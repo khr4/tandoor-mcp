@@ -109,17 +109,42 @@ func (k apiKeyword) display() string {
 	return k.Label
 }
 
+// apiNutrition is the recipe's stored nutrition block (NutritionInformation).
+// Values are decimals that Tandoor may serialize as numbers or strings; flexNum
+// tolerates both.
+type apiNutrition struct {
+	Carbohydrates flexNum `json:"carbohydrates"`
+	Fats          flexNum `json:"fats"`
+	Proteins      flexNum `json:"proteins"`
+	Calories      flexNum `json:"calories"`
+	Source        string  `json:"source"`
+}
+
+// apiProperty is one property value attached to the recipe (e.g. a custom
+// nutrition figure), with its type carrying the human-readable name and unit.
+type apiProperty struct {
+	Amount flexNum         `json:"property_amount"`
+	Type   apiPropertyType `json:"property_type"`
+}
+
+type apiPropertyType struct {
+	Name string `json:"name"`
+	Unit string `json:"unit"`
+}
+
 type apiRecipe struct {
-	ID          int          `json:"id"`
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
-	Rating      flexNum      `json:"rating"`
-	WorkingTime flexNum      `json:"working_time"`
-	WaitingTime flexNum      `json:"waiting_time"`
-	Servings    flexNum      `json:"servings"`
-	SourceURL   string       `json:"source_url"`
-	Keywords    []apiKeyword `json:"keywords"`
-	Steps       []apiStep    `json:"steps"`
+	ID          int           `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Rating      flexNum       `json:"rating"`
+	WorkingTime flexNum       `json:"working_time"`
+	WaitingTime flexNum       `json:"waiting_time"`
+	Servings    flexNum       `json:"servings"`
+	SourceURL   string        `json:"source_url"`
+	Keywords    []apiKeyword  `json:"keywords"`
+	Steps       []apiStep     `json:"steps"`
+	Nutrition   *apiNutrition `json:"nutrition"`
+	Properties  []apiProperty `json:"properties"`
 }
 
 // recipeCard is the compact result shape returned by find_recipes.
@@ -182,6 +207,56 @@ func toStepOuts(r apiRecipe) []stepOut {
 		steps = append(steps, s)
 	}
 	return steps
+}
+
+// nutritionOut and propertyOut are the get_recipe output shapes for the recipe's
+// stored nutrition. Empty figures are omitted rather than rendered as "0".
+type nutritionOut struct {
+	Calories      string `json:"calories,omitempty"`
+	Carbohydrates string `json:"carbohydrates,omitempty"`
+	Fats          string `json:"fats,omitempty"`
+	Proteins      string `json:"proteins,omitempty"`
+	Source        string `json:"source,omitempty"`
+}
+
+type propertyOut struct {
+	Name   string `json:"name"`
+	Amount string `json:"amount,omitempty"`
+	Unit   string `json:"unit,omitempty"`
+}
+
+// toNutrition converts the recipe's nutrition block, returning nil when there is
+// nothing to show so the field is omitted entirely.
+func toNutrition(r apiRecipe) *nutritionOut {
+	n := r.Nutrition
+	if n == nil {
+		return nil
+	}
+	out := nutritionOut{
+		Calories:      n.Calories.String(),
+		Carbohydrates: n.Carbohydrates.String(),
+		Fats:          n.Fats.String(),
+		Proteins:      n.Proteins.String(),
+		Source:        strings.TrimSpace(n.Source),
+	}
+	if out == (nutritionOut{}) {
+		return nil
+	}
+	return &out
+}
+
+// toProperties converts the recipe's attached property values, keeping only those
+// with a named type.
+func toProperties(r apiRecipe) []propertyOut {
+	var out []propertyOut
+	for _, p := range r.Properties {
+		name := strings.TrimSpace(p.Type.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, propertyOut{Name: name, Amount: p.Amount.String(), Unit: strings.TrimSpace(p.Type.Unit)})
+	}
+	return out
 }
 
 func toCard(r apiRecipe) recipeCard {

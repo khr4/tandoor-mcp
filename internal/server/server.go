@@ -15,7 +15,7 @@ import (
 )
 
 // Version is reported to MCP clients during initialization.
-const Version = "0.2.3"
+const Version = "0.3.0"
 
 // Options configures server-layer policy that isn't part of the API client.
 type Options struct {
@@ -56,7 +56,7 @@ func (h *handlers) register(s *mcp.Server) {
 
 	// Recipes.
 	mcp.AddTool(s, &mcp.Tool{Name: "find_recipes", Description: "Search recipes by words, keyword/ingredient names (match ALL), recipe book, minimum rating, or what you can make from on-hand foods. Returns compact recipe cards (id, name, rating, times, tags)."}, h.findRecipes)
-	mcp.AddTool(s, &mcp.Tool{Name: "get_recipe", Description: "Get one recipe (by name or id) as structured fields, a structured steps[] array (editable and accepted directly by set_recipe_steps), and a readable Markdown view. Optionally re-scale amounts to a serving count."}, h.getRecipe)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_recipe", Description: "Get one recipe (by name or id) as structured fields, a structured steps[] array (editable and accepted directly by set_recipe_steps), stored nutrition/properties when present, and a readable Markdown view. Optionally re-scale ingredient amounts to a serving count (nutrition is shown as stored, not re-scaled)."}, h.getRecipe)
 	mcp.AddTool(s, &mcp.Tool{Name: "create_recipe", Description: "Create a recipe. Provide ingredients as natural lines (\"2 cups flour\", parsed into amount+unit+food) or as {amount, unit, food}. Use top-level ingredients for a simple recipe, or steps[] for multi-step. Foods/units/keywords are created by name."}, h.createRecipe)
 	mcp.AddTool(s, &mcp.Tool{Name: "import_recipe_from_url", Description: "Import a recipe from a web page (http/https): scrapes and saves it (save=false returns a parsed preview)."}, h.importRecipeFromURL)
 	mcp.AddTool(s, &mcp.Tool{Name: "update_recipe", Description: "Edit a recipe (by name or id): name, description, servings, times, source, add/remove keywords."}, h.updateRecipe)
@@ -65,6 +65,11 @@ func (h *handlers) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "set_recipe_image", Description: "Set a recipe's image from a remote image URL, or a local file path if the server has an allowed image directory configured."}, h.setRecipeImage)
 	mcp.AddTool(s, &mcp.Tool{Name: "find_related_recipes", Description: "List recipes related to a recipe (sharing keywords/foods)."}, h.findRelatedRecipes)
 	mcp.AddTool(s, &mcp.Tool{Name: "log_cooked", Description: "Record that a recipe was cooked, optionally with a rating (0-5), servings and comment. This is how recipe ratings are set."}, h.logCooked)
+
+	// Recipe books (organizing recipes into collections).
+	mcp.AddTool(s, &mcp.Tool{Name: "add_recipe_to_book", Description: "Add a recipe (by name or id) to a recipe book (by name); the book is created if it does not exist. Idempotent."}, h.addRecipeToBook)
+	mcp.AddTool(s, &mcp.Tool{Name: "remove_recipe_from_book", Description: "Remove a recipe (by name or id) from a recipe book (by name or id). Reports not_in_book if it wasn't a member."}, h.removeRecipeFromBook)
+	mcp.AddTool(s, &mcp.Tool{Name: "list_recipe_books", Description: "List recipe books (id, name, description). Pass a recipe (name or id) to list only the books that recipe is in. Filter recipes by book with find_recipes' book argument."}, h.listRecipeBooks)
 
 	// Meal planning.
 	mcp.AddTool(s, &mcp.Tool{Name: "plan_meal", Description: "Add an entry to the meal-plan calendar for a date and meal type (by name), optionally with a recipe (by name or id) and servings."}, h.planMeal)
@@ -77,6 +82,7 @@ func (h *handlers) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "add_recipe_to_shopping", Description: "Add all of a recipe's ingredients to the shopping list (recipe by name or id), optionally scaling servings."}, h.addRecipeToShopping)
 	mcp.AddTool(s, &mcp.Tool{Name: "update_shopping_item", Description: "Check off (or edit the amount of) a single shopping list entry."}, h.updateShoppingItem)
 	mcp.AddTool(s, &mcp.Tool{Name: "clear_shopping_list", Description: "Remove shopping list entries (checked-off items by default, or all)."}, h.clearShoppingList)
+	mcp.AddTool(s, &mcp.Tool{Name: "check_shopping_items", Description: "Check or uncheck many shopping list entries at once (ids from get_shopping_list). Pass checked=false to un-check; to un-check everything, get_shopping_list with include_checked=true and pass all ids."}, h.checkShoppingItems)
 
 	// Pantry / on-hand.
 	mcp.AddTool(s, &mcp.Tool{Name: "get_pantry", Description: "List foods currently marked on-hand (in the pantry)."}, h.getPantry)
