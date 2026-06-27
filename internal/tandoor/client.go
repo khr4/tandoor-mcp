@@ -264,6 +264,23 @@ func (e *OutcomeUnknownError) Unwrap() error {
 	return e.Cause
 }
 
+// NotAttemptedError marks a request failure before the request was handed to
+// the HTTP client. Retrying it cannot duplicate a server-side write because no
+// upstream attempt was made.
+type NotAttemptedError struct {
+	Method string
+	Path   string
+	Cause  error
+}
+
+func (e *NotAttemptedError) Error() string {
+	return fmt.Sprintf("tandoor API %s %s not attempted: %v", e.Method, e.Path, e.Cause)
+}
+
+func (e *NotAttemptedError) Unwrap() error {
+	return e.Cause
+}
+
 // Do performs a JSON request. path is relative to the instance root; an "api/"
 // prefix is added when absent. body, when non-nil, is JSON-encoded. It returns
 // the raw response body (nil for empty/204 responses).
@@ -326,18 +343,24 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, new
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		raw, err := c.sendOnce(ctx, method, path, contentType, newRequest)
+		raw, attempted, err := c.sendOnce(ctx, method, path, contentType, newRequest)
 		if err == nil {
 			c.breaker.recordSuccess()
 			return raw, nil
 		}
+		if !attempted {
+			err = &NotAttemptedError{Method: method, Path: path, Cause: err}
+		}
 		lastErr = err
 		temporary := isTemporaryFailure(err)
-		opened := c.breaker.recordFailure(temporary)
-		if method != http.MethodGet && temporary {
+		opened := false
+		if attempted {
+			opened = c.breaker.recordFailure(temporary)
+		}
+		if method != http.MethodGet && temporary && attempted {
 			return nil, &OutcomeUnknownError{Method: method, Path: path, Cause: err}
 		}
-		if method != http.MethodGet || !temporary || attempt == attempts-1 || opened {
+		if !attempted || method != http.MethodGet || !temporary || attempt == attempts-1 || opened {
 			return nil, err
 		}
 		delay := retryDelay(attempt, c.retryBaseDelay, retryAfter(err))
@@ -348,19 +371,19 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, new
 	return nil, lastErr
 }
 
-func (c *Client) sendOnce(ctx context.Context, method, path, contentType string, newRequest func(context.Context) (*http.Request, error)) (json.RawMessage, error) {
+func (c *Client) sendOnce(ctx context.Context, method, path, contentType string, newRequest func(context.Context) (*http.Request, error)) (json.RawMessage, bool, error) {
 	if err := c.breaker.allow(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	release, err := c.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer release()
 
 	req, err := newRequest(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
@@ -369,18 +392,18 @@ func (c *Client) sendOnce(ctx context.Context, method, path, contentType string,
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, true, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading %s %s response: %w", method, path, err)
+		return nil, true, fmt.Errorf("reading %s %s response: %w", method, path, err)
 	}
 	if len(data) > maxResponseBytes {
-		return nil, fmt.Errorf("%s %s: response exceeds %d bytes", method, path, maxResponseBytes)
+		return nil, true, fmt.Errorf("%s %s: response exceeds %d bytes", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &APIError{
+		return nil, true, &APIError{
 			StatusCode: resp.StatusCode,
 			Method:     method,
 			Path:       path,
@@ -389,9 +412,9 @@ func (c *Client) sendOnce(ctx context.Context, method, path, contentType string,
 		}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, nil
+		return nil, true, nil
 	}
-	return json.RawMessage(data), nil
+	return json.RawMessage(data), true, nil
 }
 
 func (c *Client) acquire(ctx context.Context) (func(), error) {

@@ -70,8 +70,8 @@ func (h *handlers) getPantry(ctx context.Context, _ *mcp.CallToolRequest, _ stru
 // ---- set_food_on_hand ----
 
 type setOnhandInput struct {
-	Food   string   `json:"food,omitempty" jsonschema:"food name (use foods to set several at once)"`
-	Foods  []string `json:"foods,omitempty" jsonschema:"several food names to set in one call"`
+	Food   string   `json:"food,omitempty" jsonschema:"one food name; use exactly one of food or foods"`
+	Foods  []string `json:"foods,omitempty" jsonschema:"several food names to set in one call; use exactly one of food or foods"`
 	OnHand *bool    `json:"on_hand,omitempty" jsonschema:"true to mark on-hand (default), false to clear"`
 }
 
@@ -79,9 +79,14 @@ type setOnhandInput struct {
 // them. Multiple foods are processed independently: a failure on one is reported
 // without aborting the rest.
 func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in setOnhandInput) (*mcp.CallToolResult, any, error) {
+	hasFood := strings.TrimSpace(in.Food) != ""
+	hasFoods := len(in.Foods) > 0
+	if hasFood == hasFoods {
+		return nil, nil, fmt.Errorf("provide exactly one of food or foods")
+	}
 	all := make([]string, 0, len(in.Foods)+1)
 	all = append(all, in.Foods...)
-	if strings.TrimSpace(in.Food) != "" {
+	if hasFood {
 		all = append(all, in.Food)
 	}
 	names := make([]string, 0, len(all))
@@ -100,25 +105,33 @@ func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 
 	onHand := in.OnHand == nil || *in.OnHand
 	done := make([]map[string]any, 0, len(names))
-	var failures []string
+	var failures []map[string]any
 	for _, f := range names {
 		if ctx.Err() != nil {
-			failures = append(failures, ctx.Err().Error())
+			failures = append(failures, failureObject(ctx.Err(), map[string]any{"food": f}))
 			break
 		}
 		id, err := h.setOneFoodOnHand(ctx, f, onHand)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", f, err))
+			failures = append(failures, failureObject(err, map[string]any{"food": f}))
 			continue
 		}
 		done = append(done, map[string]any{"food": f, "id": id})
 	}
+	status := "updated"
 	if len(done) == 0 {
-		return nil, nil, fmt.Errorf("no foods updated: %s", strings.Join(failures, "; "))
+		status = "failed"
+		if hasFailureStatus(failures, "outcome_unknown") {
+			status = "outcome_unknown"
+		}
+		return jsonErrorResult(map[string]any{"status": status, "on_hand": onHand, "foods": done, "failures": failures})
 	}
-	out := map[string]any{"status": "updated", "on_hand": onHand, "foods": done}
+	out := map[string]any{"status": status, "on_hand": onHand, "foods": done}
 	if len(failures) > 0 {
 		out["status"] = "partial"
+		if hasFailureStatus(failures, "outcome_unknown") {
+			out["status"] = "partial_outcome_unknown"
+		}
 		out["failures"] = failures
 		return jsonErrorResult(out)
 	}

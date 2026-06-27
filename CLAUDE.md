@@ -53,6 +53,9 @@ keep quantities (amount + unit) first-class.
 Tools register with `mcp.AddTool[In, any]`: typed input struct (the SDK infers the
 input JSON Schema), output type `any` so handlers can return readable text content
 plus `structuredContent` without per-tool output-schema constraints.
+`structuredContent` must always be an object. If a tool naturally returns a list,
+put it under a named key such as `recipes`, `entries`, `items`, `resources` or
+`data`; do not return a top-level array.
 
 ## Engineering discipline (non-negotiable)
 
@@ -78,7 +81,16 @@ This codebase is maintained to a strict standard. Hold the line:
   tool result; do not log-and-continue, silently broaden filters, silently save
   partial imports, or discard the API's message. Partial mutations must set
   `CallToolResult.IsError`; ambiguous writes must use a structured
-  `outcome_unknown` result rather than claiming success.
+  `outcome_unknown` result rather than claiming success. Pre-send failures must
+  surface as `not_attempted`, not `outcome_unknown`.
+- **Errors stay agent-safe.** Tool/readiness errors use structured status objects
+  and bounded body/cause excerpts so agents are not flooded or confused by huge
+  upstream payloads. This is a context-size and agent-safety guard, not a privacy
+  redaction boundary; do not rely on it to hide secrets or personal data.
+- **Batch writes preserve uncertainty.** When one item in a batch has an
+  ambiguous mutating failure, keep the per-item `outcome_unknown` failure and use
+  an aggregate status such as `partial_outcome_unknown`. Do not flatten it into a
+  generic string.
 - **Build and test must be green before done.** `make vet test` passes, or it is
   not finished.
 

@@ -40,6 +40,10 @@ Safe read requests (`GET`) retry temporary upstream failures with bounded
 exponential backoff and `Retry-After` support. Mutating requests are never
 blindly retried: if a timeout or temporary upstream failure leaves the commit
 status unknown, the tool returns a structured `outcome_unknown` MCP error.
+Failures before a request is handed to Tandoor return `not_attempted`, which is
+safe to retry after the local cause is resolved. Tool errors are object-shaped
+structured JSON with bounded body/cause excerpts to keep agent context useful and
+small; this is an agent-safety guard, not a privacy redaction boundary.
 
 ### Transport
 
@@ -140,31 +144,35 @@ Recipes — every recipe argument accepts a **name or id**:
 | `find_recipes` | Search by words, keyword/ingredient **names** (match ALL), book, rating, or makeable-now. Requested name filters fail closed if they cannot be resolved. Returns compact cards. |
 | `get_recipe` | One recipe as structured fields, an editable stored `steps[]` array, stored nutrition/properties (when set), an `edit_revision` for stale-write protection, and a Markdown view; optional `servings` re-scales the Markdown amounts only (not nutrition), leaving structured steps safe to edit. |
 | `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`; top-level `ingredients` for simple recipes or `steps[]` for multi-step. Foods/units/keywords created by name. |
-| `import_recipe_from_url` | Scrape a public web page and save it. `save=false` returns a preview only when Tandoor returns parsed recipe data without saving server-side. If parsed ingredients would be dropped, saving is refused unless `allow_partial=true`. |
+| `import_recipe_from_url` | Scrape a public web page and save it. `save=false` returns a preview only when Tandoor returns parsed recipe data without saving server-side. If parsed ingredients would be dropped, saving is refused unless `allow_partial=true`; partial saves return `imported_partial` with dropped ingredients listed. |
 | `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. Keyword edits require `expected_revision` from `get_recipe`. |
-| `set_recipe_steps` | Replace a recipe's steps/ingredients — read `get_recipe`'s `steps[]` and `edit_revision`, edit, pass back with `expected_revision`. |
+| `set_recipe_steps` | Replace a recipe's steps/ingredients with a non-empty list — read `get_recipe`'s `steps[]` and `edit_revision`, edit, pass back with `expected_revision`. This tool does not clear all steps. |
 | `delete_recipe` | Delete a recipe. |
-| `set_recipe_image` | Set an image from a public remote URL, or a regular local file within `TANDOOR_IMAGE_DIR`. |
-| `find_related_recipes` | Recipes sharing keywords/foods. |
+| `set_recipe_image` | Set an image from exactly one source: a public remote URL, or a regular local file within `TANDOOR_IMAGE_DIR`. URL credentials, localhost, private, link-local and internal hosts are rejected. |
+| `find_related_recipes` | Recipes sharing keywords/foods; results are returned under `recipes`. |
 | `log_cooked` | Record a cook + rating (how recipes get rated). |
-| `add_recipe_to_book` / `remove_recipe_from_book` / `list_recipe_books` | Organize recipes into books (book created on first add). Filter by book with `find_recipes`. |
+| `add_recipe_to_book` / `remove_recipe_from_book` / `list_recipe_books` | Organize recipes into books (book created on first add). If a named book cannot be resolved, use `list_recipe_books` before retrying. Filter by book with `find_recipes`. |
 
 Meal planning, shopping, pantry, taxonomy:
 
 | Tool | Purpose |
 |---|---|
-| `plan_meal` / `get_meal_plan` / `remove_meal_plan_entry` | Manage the meal-plan calendar (meal type by name, recipe by name/id). |
+| `plan_meal` / `get_meal_plan` / `remove_meal_plan_entry` | Manage the meal-plan calendar (meal type by name, recipe by name/id). `get_meal_plan` returns entries under `entries`. |
 | `get_shopping_list` | Current entries as readable lines plus structured amount/unit/food fields and truncation metadata. |
-| `add_to_shopping_list` | Add an ad-hoc food with amount + unit. |
+| `add_to_shopping_list` | Add an ad-hoc food. Pass amount/unit for a quantity; omit amount for a no-amount item. |
 | `add_recipe_to_shopping` | Add a recipe's ingredients (optionally scaled). |
-| `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. Clear refuses to run if the shopping list scan is truncated and returns an MCP error result if any delete in the batch fails. |
+| `update_shopping_item` / `clear_shopping_list` | Check off / edit amount / clear entries. Clear refuses to run if the shopping list scan is truncated and returns an MCP error result with per-entry failures if any delete in the batch fails. |
 | `check_shopping_items` | Check or uncheck many entries at once (incl. uncheck-all). |
-| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand (pass `foods[]` to stock several at once). Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos; partial batch failures are MCP error results with per-food details. |
-| `list_taxonomy` | List keywords, foods or units (`kind`) with ids. |
+| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand. Pass exactly one of `food` or `foods[]`. Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos; partial batch failures are MCP error results with per-food details. `get_pantry` includes truncation metadata. |
+| `list_taxonomy` | List keywords, foods or units (`kind`) with ids; results are returned under `items`. |
 | `merge_taxonomy` / `move_taxonomy` | Merge or re-parent a keyword/food/unit (by name or id). |
 
 Ingredient quantities are always kept explicit: amounts and units are split out
 (via Tandoor's parser for natural lines) rather than flattened into free text.
+
+For any mutation returning `outcome_unknown` or `partial_outcome_unknown`, re-read
+the affected recipe, shopping list, pantry, taxonomy or book state before
+retrying. The upstream request reached Tandoor and may have committed.
 
 ### Generic API tools (escape hatch)
 
@@ -183,7 +191,9 @@ canonicalized and cannot use empty, `.` or `..` segments.
 Some capabilities are intentionally not exposed as designed tools until their
 safe contract is verified. Use the generic tools only when the designed surface
 does not cover a workflow and the target resource is visible in
-`tandoor_resources`.
+`tandoor_resources`. Generic API JSON responses are returned under `data`; empty
+and non-JSON upstream responses use explicit `empty_response` or
+`non_json_response` status objects.
 
 ## Development
 

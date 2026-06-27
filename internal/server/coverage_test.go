@@ -233,6 +233,24 @@ func TestSetRecipeStepsRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestSetRecipeStepsRejectsEmptyReplacement(t *testing.T) {
+	recipeRaw := `{"id":5,"name":"X","steps":[{"instruction":"keep me"}]}`
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("backend must not patch or parse an empty replacement: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, recipeRaw)
+	})
+	_, _, err := h.setRecipeSteps(context.Background(), nil, setRecipeStepsInput{
+		Recipe:           "5",
+		ExpectedRevision: recipeRevision([]byte(recipeRaw)),
+		Steps:            []stepInput{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "non-empty") {
+		t.Fatalf("err = %v, want non-empty rejection", err)
+	}
+}
+
 func TestDeleteRecipe(t *testing.T) {
 	var method, path string
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +282,10 @@ func TestFindRelatedRecipes(t *testing.T) {
 	}
 	if !strings.Contains(resultText(t, res), "Twin Stew") {
 		t.Errorf("result = %s", resultText(t, res))
+	}
+	out := structuredContentMap(t, res)
+	if _, ok := out["recipes"]; !ok {
+		t.Fatalf("structuredContent = %v, want recipes envelope", out)
 	}
 }
 
@@ -393,6 +415,9 @@ func TestImportAllowsDroppedIngredientWhenExplicit(t *testing.T) {
 	if len(out.Warnings) == 0 || !strings.Contains(out.Warnings[0], "mystery") {
 		t.Errorf("warnings = %v, want one about the dropped ingredient", out.Warnings)
 	}
+	if out.Status != "imported_partial" || !out.Partial || len(out.DroppedIngredients) == 0 {
+		t.Errorf("out = %+v, want explicit partial import metadata", out)
+	}
 }
 
 // ---- set_recipe_image gating ----
@@ -419,6 +444,12 @@ func TestSetRecipeImageRejectsBadScheme(t *testing.T) {
 	}
 	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImageURL: "http://127.0.0.1/x.png"}); err == nil {
 		t.Error("expected loopback SSRF rejection")
+	}
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5"}); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("err = %v, want missing-source rejection", err)
+	}
+	if _, _, err := h.setRecipeImage(context.Background(), nil, recipeImageInput{Recipe: "5", ImagePath: "pie.png", ImageURL: "https://img.example/x.png"}); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("err = %v, want double-source rejection", err)
 	}
 }
 
@@ -464,12 +495,17 @@ func TestGetMealPlanUsesDateFilterAndEndDate(t *testing.T) {
 	if !strings.Contains(query, "from_date=2026-07-01") || strings.Contains(query, "T00") {
 		t.Errorf("query = %q, want plain dates", query)
 	}
-	var cards []mealPlanCard
-	if err := json.Unmarshal([]byte(resultText(t, res)), &cards); err != nil {
+	var out struct {
+		Entries []mealPlanCard `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(cards) != 1 || cards[0].EndDate == "" || cards[0].Recipe != "Stew" || cards[0].Note != "prep ahead" {
-		t.Errorf("cards = %+v", cards)
+	if len(out.Entries) != 1 || out.Entries[0].EndDate == "" || out.Entries[0].Recipe != "Stew" || out.Entries[0].Note != "prep ahead" {
+		t.Errorf("entries = %+v", out.Entries)
+	}
+	if _, ok := structuredContentMap(t, res)["entries"]; !ok {
+		t.Fatalf("structuredContent = %v, want entries envelope", res.StructuredContent)
 	}
 }
 
@@ -549,12 +585,17 @@ func TestClearShoppingListAggregatesErrors(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatal(err)
 	}
-	// Only checked items 1 and 2 are attempted; 2 fails, so removed=1, status partial.
-	if out["removed"] != 1.0 || out["status"] != "partial" {
-		t.Errorf("out = %v, want removed 1 partial", out)
+	// Only checked items 1 and 2 are attempted; 2 fails after reaching Tandoor,
+	// so removed=1 and the batch result carries an unknown write outcome.
+	if out["removed"] != 1.0 || out["status"] != "partial_outcome_unknown" {
+		t.Errorf("out = %v, want removed 1 partial_outcome_unknown", out)
 	}
 	if !res.IsError {
 		t.Error("partial clear should be an MCP error result")
+	}
+	failures, ok := out["failures"].([]any)
+	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "id") != 2.0 {
+		t.Fatalf("failures = %v, want structured outcome_unknown for entry 2", out["failures"])
 	}
 	if !deleted["/api/shopping-list-entry/1/"] {
 		t.Error("entry 1 should have been deleted despite entry 2 failing")
@@ -584,8 +625,28 @@ func TestSetFoodOnHandPartialIsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setFoodOnHand: %v", err)
 	}
-	if !res.IsError || !strings.Contains(resultText(t, res), `"status": "partial"`) {
-		t.Fatalf("result = %s, want partial MCP error", resultText(t, res))
+	if !res.IsError || !strings.Contains(resultText(t, res), `"status": "partial_outcome_unknown"`) {
+		t.Fatalf("result = %s, want partial_outcome_unknown MCP error", resultText(t, res))
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	failures, ok := out["failures"].([]any)
+	if !ok || len(failures) != 1 || at(t, failures[0], "status") != "outcome_unknown" || at(t, failures[0], "food") != "flour" {
+		t.Fatalf("failures = %v, want structured outcome_unknown for flour", out["failures"])
+	}
+}
+
+func TestSetFoodOnHandRejectsAmbiguousSelectors(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for invalid food selector")
+	})
+	if _, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{}); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("err = %v, want missing selector rejection", err)
+	}
+	if _, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "milk", Foods: []string{"flour"}}); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("err = %v, want ambiguous selector rejection", err)
 	}
 }
 
@@ -631,6 +692,13 @@ func TestListTaxonomyAndBadKind(t *testing.T) {
 	}
 	if !strings.Contains(resultText(t, res), "gram") {
 		t.Errorf("result = %s", resultText(t, res))
+	}
+	out := structuredContentMap(t, res)
+	if out["kind"] != "unit" {
+		t.Fatalf("structuredContent = %v, want kind unit", out)
+	}
+	if _, ok := out["items"]; !ok {
+		t.Fatalf("structuredContent = %v, want items envelope", out)
 	}
 	if _, _, err := h.listTaxonomy(context.Background(), nil, listTaxonomyInput{Kind: "bogus"}); err == nil {
 		t.Error("expected error for bad kind")
@@ -694,6 +762,9 @@ func TestBuildIngredientHeader(t *testing.T) {
 	}
 	if m["is_header"] != true || m["note"] != "For the sauce" {
 		t.Errorf("header ingredient = %v", m)
+	}
+	if _, err := buildIngredient(ingredientInput{IsHeader: true}, nil); err == nil || !strings.Contains(err.Error(), "note or text") {
+		t.Errorf("err = %v, want empty-header rejection", err)
 	}
 }
 

@@ -68,15 +68,11 @@ func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 		addInts(q, "foods_and", ids)
 	}
 	if in.Book != "" {
-		id, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", in.Book)
-		switch {
-		case err != nil:
+		id, err := h.resolveRecipeBookID(ctx, in.Book)
+		if err != nil {
 			return nil, nil, err
-		case found:
-			q.Set("books_and", strconv.Itoa(id))
-		default:
-			return nil, nil, fmt.Errorf("recipe book %q not found", in.Book)
 		}
+		q.Set("books_and", strconv.Itoa(id))
 	}
 	addInt(q, "rating_gte", in.MinRating)
 	addBool(q, "makenow", in.MakeableNow)
@@ -289,14 +285,16 @@ type sourceRecipe struct {
 }
 
 type importRecipeOutput struct {
-	ID         int      `json:"id,omitempty"`
-	Name       string   `json:"name,omitempty"`
-	Status     string   `json:"status"`
-	Source     string   `json:"source,omitempty"`
-	ImageURL   string   `json:"image_url,omitempty"`
-	Duplicates []named  `json:"duplicates,omitempty"`
-	Warnings   []string `json:"warnings,omitempty"`
-	Markdown   string   `json:"markdown,omitempty"`
+	ID                 int      `json:"id,omitempty"`
+	Name               string   `json:"name,omitempty"`
+	Status             string   `json:"status"`
+	Source             string   `json:"source,omitempty"`
+	ImageURL           string   `json:"image_url,omitempty"`
+	Duplicates         []named  `json:"duplicates,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
+	DroppedIngredients []string `json:"dropped_ingredients,omitempty"`
+	Partial            bool     `json:"partial,omitempty"`
+	Markdown           string   `json:"markdown,omitempty"`
 }
 
 // importRecipeFromURL scrapes a recipe and (by default) saves it.
@@ -374,9 +372,16 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	if err := json.Unmarshal(created, &rec); err != nil {
 		return nil, nil, fmt.Errorf("decoding imported recipe: %w", err)
 	}
+	status := "imported"
+	partial := false
+	if len(warnings) > 0 {
+		status = "imported_partial"
+		partial = true
+	}
 	return jsonResult(importRecipeOutput{
-		ID: rec.ID, Name: rec.Name, Status: "imported", Source: in.URL,
+		ID: rec.ID, Name: rec.Name, Status: status, Source: in.URL,
 		ImageURL: sr.ImageURL, Duplicates: resp.Duplicates, Warnings: warnings,
+		DroppedIngredients: warnings, Partial: partial,
 	})
 }
 
@@ -444,7 +449,7 @@ func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 type setRecipeStepsInput struct {
 	Recipe           string      `json:"recipe" jsonschema:"recipe name or numeric id"`
 	ExpectedRevision string      `json:"expected_revision" jsonschema:"edit_revision from get_recipe"`
-	Steps            []stepInput `json:"steps" jsonschema:"the full new ordered list of steps and ingredients, replacing the existing ones"`
+	Steps            []stepInput `json:"steps" jsonschema:"the full non-empty ordered list of steps and ingredients, replacing the existing ones"`
 }
 
 // setRecipeSteps replaces a recipe's steps/ingredients (re-describe to edit).
@@ -458,6 +463,9 @@ func (h *handlers) setRecipeSteps(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 	if err := h.checkRecipeRevision(ctx, id, in.ExpectedRevision); err != nil {
 		return nil, nil, err
+	}
+	if len(in.Steps) == 0 {
+		return nil, nil, fmt.Errorf("steps must be a non-empty list; this tool does not clear all recipe steps")
 	}
 	steps, err := h.buildSteps(ctx, in.Steps)
 	if err != nil {
@@ -574,7 +582,7 @@ func (h *handlers) deleteRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 type recipeImageInput struct {
 	Recipe    string `json:"recipe" jsonschema:"recipe name or numeric id"`
 	ImagePath string `json:"image_path,omitempty" jsonschema:"local image file path; only allowed within the server's configured image directory"`
-	ImageURL  string `json:"image_url,omitempty" jsonschema:"remote image URL (http/https) for Tandoor to fetch and store"`
+	ImageURL  string `json:"image_url,omitempty" jsonschema:"public remote image URL (http/https; no credentials, localhost, private, link-local, or internal hosts) for Tandoor to fetch and store"`
 }
 
 // setRecipeImage sets a recipe image from a (gated) local file or a remote URL.
@@ -584,8 +592,13 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 		return nil, nil, err
 	}
 	path := fmt.Sprintf("recipe/%d/image/", id)
+	hasPath := strings.TrimSpace(in.ImagePath) != ""
+	hasURL := strings.TrimSpace(in.ImageURL) != ""
+	if hasPath == hasURL {
+		return nil, nil, fmt.Errorf("provide exactly one of image_path or image_url")
+	}
 	switch {
-	case in.ImagePath != "":
+	case hasPath:
 		f, size, err := h.openSafeImage(in.ImagePath)
 		if err != nil {
 			return nil, nil, err
@@ -597,18 +610,17 @@ func (h *handlers) setRecipeImage(ctx context.Context, _ *mcp.CallToolRequest, i
 		if _, err := h.c.Upload(ctx, http.MethodPut, path, nil, "image", filepath.Base(f.Name()), io.LimitReader(f, maxImageBytes)); err != nil {
 			return nil, nil, err
 		}
-		return jsonResult(map[string]any{"status": "image set", "id": id, "from": "file"})
-	case in.ImageURL != "":
+		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "file"})
+	case hasURL:
 		if err := validateHTTPURL(in.ImageURL); err != nil {
 			return nil, nil, err
 		}
 		if _, err := h.c.Upload(ctx, http.MethodPut, path, map[string]string{"image_url": in.ImageURL}, "", "", nil); err != nil {
 			return nil, nil, err
 		}
-		return jsonResult(map[string]any{"status": "image set", "id": id, "from": "url"})
-	default:
-		return nil, nil, fmt.Errorf("provide image_path or image_url")
+		return jsonResult(map[string]any{"status": "image_set", "id": id, "from": "url"})
 	}
+	return nil, nil, fmt.Errorf("provide exactly one of image_path or image_url")
 }
 
 // errImagePathDenied is a single, uniform error for any local image path that is
@@ -681,7 +693,7 @@ func (h *handlers) findRelatedRecipes(ctx context.Context, _ *mcp.CallToolReques
 	for _, r := range recipes {
 		cards = append(cards, toCard(r))
 	}
-	return jsonResult(cards)
+	return jsonResult(map[string]any{"recipes": cards})
 }
 
 // ---- log_cooked ----

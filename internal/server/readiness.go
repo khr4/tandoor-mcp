@@ -69,7 +69,7 @@ func (p *readyProbe) checkReady(ctx context.Context) bool {
 		err := p.check(ctx)
 		ready := err == nil
 		if err != nil {
-			log.Printf("readiness check failed: %v", err)
+			log.Printf("readiness check failed: %s", logErrorSummary(err))
 		}
 
 		p.mu.Lock()

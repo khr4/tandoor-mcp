@@ -48,6 +48,24 @@ type addRecipeToBookInput struct {
 	Book   string `json:"book" jsonschema:"recipe book name; created if it does not exist"`
 }
 
+func (h *handlers) resolveRecipeBookID(ctx context.Context, ref string) (int, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return 0, fmt.Errorf("a recipe book (name or id) is required")
+	}
+	if id, err := strconv.Atoi(ref); err == nil {
+		return id, nil
+	}
+	id, found, err := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", ref)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("recipe book %q not found - use list_recipe_books to see existing books", ref)
+	}
+	return id, nil
+}
+
 // addRecipeToBook files a recipe into a book, creating the book by name if needed.
 // The book is resolved by exact name first (recipe-book does not get-or-create on
 // POST, so a blind create would duplicate it); the membership POST is idempotent.
@@ -156,7 +174,7 @@ func (h *handlers) removeRecipeFromBook(ctx context.Context, _ *mcp.CallToolRequ
 	if err != nil {
 		return nil, nil, err
 	}
-	bookID, err := h.resolveTaxonomyID(ctx, "recipe-book", in.Book)
+	bookID, err := h.resolveRecipeBookID(ctx, in.Book)
 	if err != nil {
 		return nil, nil, err
 	}

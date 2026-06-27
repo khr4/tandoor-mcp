@@ -59,8 +59,10 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 	names := map[string]bool{}
+	descriptions := map[string]string{}
 	for _, tl := range tools.Tools {
 		names[tl.Name] = true
+		descriptions[tl.Name] = tl.Description
 	}
 	wantTools := []string{
 		"tandoor_resources", "tandoor_list", "tandoor_action",
@@ -81,6 +83,19 @@ func TestEndToEndListToolsAndCall(t *testing.T) {
 	for _, want := range wantTools {
 		if !names[want] {
 			t.Errorf("tool %q not registered (have %d tools)", want, len(tools.Tools))
+		}
+	}
+	for name, want := range map[string]string{
+		"tandoor_action":       "Raw responses are returned under data",
+		"tandoor_resources":    "Prefer designed tools first",
+		"set_recipe_steps":     "non-empty steps list",
+		"set_recipe_image":     "exactly one source",
+		"set_food_on_hand":     "exactly one of food",
+		"clear_shopping_list":  "partial_outcome_unknown",
+		"add_to_shopping_list": "omit amount",
+	} {
+		if !strings.Contains(descriptions[name], want) {
+			t.Errorf("%s description = %q, want %q", name, descriptions[name], want)
 		}
 	}
 
@@ -133,8 +148,9 @@ func TestEndToEndOperationTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if !res.IsError || !strings.Contains(toolText(res), "deadline") {
-		t.Fatalf("result IsError=%v text=%q, want deadline error", res.IsError, toolText(res))
+	out := structuredContentMap(t, res)
+	if !res.IsError || out["status"] != "timeout" {
+		t.Fatalf("result IsError=%v structured=%v text=%q, want timeout error", res.IsError, out, toolText(res))
 	}
 }
 

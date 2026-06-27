@@ -130,7 +130,7 @@ func (h *handlers) getShoppingList(ctx context.Context, _ *mcp.CallToolRequest, 
 
 type addShoppingInput struct {
 	Food   string   `json:"food" jsonschema:"food name to add; created if missing"`
-	Amount *float64 `json:"amount,omitempty" jsonschema:"quantity (default 1)"`
+	Amount *float64 `json:"amount,omitempty" jsonschema:"quantity; omit for a no-amount item"`
 	Unit   string   `json:"unit,omitempty" jsonschema:"unit name for the amount, e.g. g, cup"`
 }
 
@@ -230,17 +230,17 @@ func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 		return nil, nil, fmt.Errorf("refusing to clear shopping list after a partial scan of %d pages; use tandoor_list with explicit pagination", shoppingScanPages)
 	}
 	removed := 0
-	var failures []string
+	var failures []map[string]any
 	for _, e := range entries {
 		if onlyChecked && !e.Checked {
 			continue
 		}
 		if ctx.Err() != nil {
-			failures = append(failures, ctx.Err().Error())
+			failures = append(failures, failureObject(ctx.Err(), map[string]any{"id": e.ID}))
 			break
 		}
 		if _, err := h.c.Do(ctx, http.MethodDelete, fmt.Sprintf("shopping-list-entry/%d/", e.ID), nil, nil); err != nil {
-			failures = append(failures, fmt.Sprintf("entry %d: %v", e.ID, err))
+			failures = append(failures, failureObject(err, map[string]any{"id": e.ID}))
 			continue
 		}
 		removed++
@@ -252,6 +252,9 @@ func (h *handlers) clearShoppingList(ctx context.Context, _ *mcp.CallToolRequest
 	out := map[string]any{"status": "cleared", "removed": removed, "scope": scope}
 	if len(failures) > 0 {
 		out["status"] = "partial"
+		if hasFailureStatus(failures, "outcome_unknown") {
+			out["status"] = "partial_outcome_unknown"
+		}
 		out["failures"] = failures
 		return jsonErrorResult(out)
 	}

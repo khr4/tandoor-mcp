@@ -93,26 +93,12 @@ func TestSetFoodsOnHandBatch(t *testing.T) {
 	}
 }
 
-func TestSetFoodOnHandDedupsFoodAndFoods(t *testing.T) {
-	posts := 0
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/food/":
-			posts++
-			name, _ := at(t, decodeBody(t, r), "name").(string)
-			_, _ = io.WriteString(w, fmt.Sprintf(`{"id":%d,"name":%q}`, len(name)+posts, name))
-		case r.Method == http.MethodPatch:
-			_, _ = io.WriteString(w, `{"id":1}`)
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-		}
+func TestSetFoodOnHandRejectsFoodAndFoodsTogether(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for ambiguous food selectors")
 	})
-	// "flour" appears via both Food and Foods (different case) -> one resolution.
 	_, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "flour", Foods: []string{"Flour", "sugar"}})
-	if err != nil {
-		t.Fatalf("setFoodOnHand: %v", err)
-	}
-	if posts != 2 {
-		t.Errorf("resolved %d foods, want 2 (flour/Flour deduplicated)", posts)
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("err = %v, want exact-one selector rejection", err)
 	}
 }

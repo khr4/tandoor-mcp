@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,15 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 	return tc.Text
 }
 
+func structuredContentMap(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	out, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structuredContent = %T, want object", res.StructuredContent)
+	}
+	return out
+}
+
 func TestOptionsFromEnvOperationTimeout(t *testing.T) {
 	t.Setenv("TANDOOR_IMAGE_DIR", "/tmp/images")
 	t.Setenv("TANDOOR_OPERATION_TIMEOUT", "9")
@@ -99,6 +109,10 @@ func TestGenericListBuildsPathAndQuery(t *testing.T) {
 	}
 	if res.StructuredContent == nil {
 		t.Fatal("generic JSON result should include structuredContent")
+	}
+	out := structuredContentMap(t, res)
+	if _, ok := out["data"]; !ok {
+		t.Fatalf("generic JSON structuredContent = %v, want data envelope", out)
 	}
 }
 
@@ -241,6 +255,78 @@ func TestActionCalls(t *testing.T) {
 	if !strings.Contains(resultText(t, res), `"id": 1`) {
 		t.Errorf("result = %q", resultText(t, res))
 	}
+	out := structuredContentMap(t, res)
+	if _, ok := out["data"]; !ok {
+		t.Fatalf("generic action structuredContent = %v, want data envelope", out)
+	}
+}
+
+func TestRawResultEnvelopesNonObjectPayloads(t *testing.T) {
+	res, _, err := rawResult([]byte(`[{"id":1}]`))
+	if err != nil {
+		t.Fatalf("rawResult json: %v", err)
+	}
+	out := structuredContentMap(t, res)
+	if _, ok := out["data"]; !ok {
+		t.Fatalf("raw JSON structuredContent = %v, want data envelope", out)
+	}
+
+	res, _, err = rawResult(nil)
+	if err != nil {
+		t.Fatalf("rawResult empty: %v", err)
+	}
+	out = structuredContentMap(t, res)
+	if out["status"] != "empty_response" {
+		t.Fatalf("empty structuredContent = %v, want empty_response", out)
+	}
+
+	res, _, err = rawResult([]byte("<html>" + strings.Repeat("x", 1400) + "</html>"))
+	if err != nil {
+		t.Fatalf("rawResult non-json: %v", err)
+	}
+	out = structuredContentMap(t, res)
+	if out["status"] != "non_json_response" || out["body_truncated"] != true {
+		t.Fatalf("non-json structuredContent = %v, want bounded non_json_response", out)
+	}
+	if len(out["body_excerpt"].(string)) > toolErrorExcerptRunes+len("<html>") {
+		t.Fatalf("body excerpt too large: %d", len(out["body_excerpt"].(string)))
+	}
+}
+
+func TestToolErrorResultNormalizesAPIError(t *testing.T) {
+	res, _, err := toolErrorResult(&tandoor.APIError{
+		StatusCode: http.StatusBadGateway,
+		Method:     http.MethodPost,
+		Path:       "recipe/",
+		Body:       strings.Repeat("x", toolErrorExcerptRunes+50),
+	})
+	if err != nil {
+		t.Fatalf("toolErrorResult: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("API error must be an MCP error result")
+	}
+	out := structuredContentMap(t, res)
+	if out["status"] != "upstream_error" || out["status_code"] != float64(http.StatusBadGateway) || out["body_truncated"] != true {
+		t.Fatalf("error structuredContent = %v", out)
+	}
+	if len(resultText(t, res)) > toolErrorExcerptRunes+700 {
+		t.Fatalf("error text is not bounded enough: %d", len(resultText(t, res)))
+	}
+}
+
+func TestObjectStructuredWrapsScalarAndArray(t *testing.T) {
+	for _, input := range []any{"ok", []int{1, 2}} {
+		res, _, err := jsonResult(input)
+		if err != nil {
+			t.Fatalf("jsonResult(%T): %v", input, err)
+		}
+		out := structuredContentMap(t, res)
+		if _, ok := out["value"]; !ok {
+			b, _ := json.Marshal(out)
+			t.Fatalf("structuredContent = %s, want value wrapper", b)
+		}
+	}
 }
 
 func TestCreateRecipeRequiresName(t *testing.T) {
@@ -294,6 +380,33 @@ func TestResourcesCatalog(t *testing.T) {
 			t.Errorf("catalog exposes restricted resource %s: %s", denied, text)
 		}
 	}
+	var out struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("catalog JSON: %v", err)
+	}
+	var foundRecipe bool
+	for _, r := range out.Resources {
+		if r.Name == "recipe" {
+			foundRecipe = true
+			if !containsString(r.PreferredTools, "find_recipes") || !containsString(r.PreferredTools, "set_recipe_steps") {
+				t.Fatalf("recipe preferred tools = %v", r.PreferredTools)
+			}
+		}
+	}
+	if !foundRecipe {
+		t.Fatal("recipe resource missing from catalog")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRegisterAllTools ensures every tool registers without a schema-inference panic.

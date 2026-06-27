@@ -137,7 +137,7 @@ func (h *handlers) getMealPlan(ctx context.Context, _ *mcp.CallToolRequest, in g
 	for _, m := range plans {
 		cards = append(cards, toMealPlanCard(m))
 	}
-	return jsonResult(cards)
+	return jsonResult(map[string]any{"entries": cards})
 }
 
 // ---- remove_meal_plan_entry ----

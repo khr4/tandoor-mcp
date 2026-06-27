@@ -36,7 +36,7 @@ func (h *handlers) resourceCatalog(_ context.Context, _ *mcp.CallToolRequest, _ 
 			visible = append(visible, r)
 		}
 	}
-	return jsonResult(visible)
+	return jsonResult(map[string]any{"resources": visible})
 }
 
 type listInput struct {

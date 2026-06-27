@@ -76,7 +76,7 @@ func (h *handlers) listTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err := decodeList(raw, &items); err != nil {
 		return nil, nil, fmt.Errorf("decoding %s: %w", kind, err)
 	}
-	return jsonResult(items)
+	return jsonResult(map[string]any{"kind": kind, "items": items})
 }
 
 // ---- merge_taxonomy ----

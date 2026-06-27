@@ -133,6 +133,23 @@ func TestRemoveRecipeFromBookDeletesEntry(t *testing.T) {
 	}
 }
 
+func TestRemoveRecipeFromBookMissingNameSuggestsListBooks(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/recipe-book/":
+			_, _ = io.WriteString(w, `{"results":[]}`)
+		case r.URL.Path == "/api/recipe-book-entry/":
+			t.Fatal("must not query memberships when the book name is unresolved")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	_, _, err := h.removeRecipeFromBook(context.Background(), nil, removeRecipeFromBookInput{Recipe: "5", Book: "Favorites"})
+	if err == nil || !strings.Contains(err.Error(), "list_recipe_books") {
+		t.Fatalf("err = %v, want list_recipe_books hint", err)
+	}
+}
+
 func TestRemoveRecipeFromBookNotMember(t *testing.T) {
 	deleted := false
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {

@@ -487,3 +487,45 @@ func TestBulkheadCapsConcurrentUpstreamCalls(t *testing.T) {
 		t.Fatalf("first Do: %v", err)
 	}
 }
+
+func TestMutatingBulkheadFailureIsNotAttempted(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		entered <- struct{}{}
+		<-release
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{BaseURL: srv.URL, Token: "tok", Timeout: time.Second, MaxConcurrency: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil)
+		done <- err
+	}()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err = c.Do(ctx, http.MethodPost, "recipe/", nil, map[string]any{"name": "Soup"})
+	var notAttempted *NotAttemptedError
+	if !errors.As(err, &notAttempted) {
+		t.Fatalf("err = %T %[1]v, want NotAttemptedError", err)
+	}
+	var unknown *OutcomeUnknownError
+	if errors.As(err, &unknown) {
+		t.Fatalf("err = %T %[1]v, must not be OutcomeUnknown when no upstream request was sent", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first Do: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want only the occupying GET to reach upstream", attempts)
+	}
+}

@@ -19,7 +19,7 @@ type ingredientInput struct {
 	Unit     string   `json:"unit,omitempty" jsonschema:"unit name for the amount, e.g. g, ml, cup, tbsp; leave empty for countable items like eggs"`
 	Food     string   `json:"food,omitempty" jsonschema:"food/ingredient name, e.g. flour"`
 	Note     string   `json:"note,omitempty" jsonschema:"preparation note, e.g. finely chopped"`
-	IsHeader bool     `json:"is_header,omitempty" jsonschema:"true for a section header line (e.g. \"For the sauce\"); the header text goes in note"`
+	IsHeader bool     `json:"is_header,omitempty" jsonschema:"true for a section header line (e.g. \"For the sauce\"); note or text must contain the header text"`
 }
 
 type stepInput struct {
@@ -131,6 +131,9 @@ func buildIngredient(in ingredientInput, parsed *apiIngredient) (map[string]any,
 		text := strings.TrimSpace(in.Note)
 		if text == "" {
 			text = strings.TrimSpace(in.Text)
+		}
+		if text == "" {
+			return nil, fmt.Errorf("ingredient header needs note or text")
 		}
 		return map[string]any{
 			"is_header":     true,

@@ -419,7 +419,11 @@ func TestSetFoodOnHandClearDoesNotCreate(t *testing.T) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[]}`)
 	})
 	onHand := false
-	if _, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "Typo", OnHand: &onHand}); err == nil {
-		t.Fatal("expected clearing a missing food to fail")
+	res, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Food: "Typo", OnHand: &onHand})
+	if err != nil {
+		t.Fatalf("setFoodOnHand: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), `"status": "failed"`) {
+		t.Fatalf("result = %s, want failed MCP error", resultText(t, res))
 	}
 }
