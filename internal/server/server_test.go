@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -54,6 +55,22 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 	return tc.Text
 }
 
+func TestOptionsFromEnvOperationTimeout(t *testing.T) {
+	t.Setenv("TANDOOR_IMAGE_DIR", "/tmp/images")
+	t.Setenv("TANDOOR_OPERATION_TIMEOUT", "9")
+	opts, err := OptionsFromEnv()
+	if err != nil {
+		t.Fatalf("OptionsFromEnv: %v", err)
+	}
+	if opts.ImageDir != "/tmp/images" || opts.OperationTimeout != 9*time.Second {
+		t.Fatalf("opts = %+v, want image dir and 9s operation timeout", opts)
+	}
+	t.Setenv("TANDOOR_OPERATION_TIMEOUT", "0")
+	if _, err := OptionsFromEnv(); err == nil {
+		t.Fatal("expected invalid operation timeout error")
+	}
+}
+
 func TestGenericListBuildsPathAndQuery(t *testing.T) {
 	rec := &recorder{reply: `{"count":1,"results":[{"id":1}]}`}
 	h := newHandlers(t, rec)
@@ -82,6 +99,14 @@ func TestGenericListBuildsPathAndQuery(t *testing.T) {
 	}
 	if res.StructuredContent == nil {
 		t.Fatal("generic JSON result should include structuredContent")
+	}
+}
+
+func TestGenericListRejectsInvalidPageSize(t *testing.T) {
+	h := newHandlers(t, &recorder{})
+	tooHigh := maxGenericPageSize + 1
+	if _, _, err := h.genericList(context.Background(), nil, listInput{Resource: "recipe", PageSize: &tooHigh}); err == nil {
+		t.Fatal("expected page_size rejection")
 	}
 }
 

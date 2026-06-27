@@ -16,10 +16,14 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
 
 ## Layout
 
-- `main.go` — entrypoint: read env config, build client, serve MCP over stdio.
+- `main.go` — entrypoint: read env config, build client, serve MCP over stdio
+  or HTTP when configured.
 - `internal/tandoor/` — HTTP client. `Do` (JSON) and `Upload` (multipart), Bearer
-  auth, query building, `APIError` carrying the verbatim API body. Treats bodies
-  as opaque JSON on purpose — the API is large and version-dependent.
+  auth, query building, safe-read retry/backoff, upstream concurrency cap,
+  circuit breaker, `APIError` carrying the verbatim API body, and
+  `OutcomeUnknownError` for mutating requests whose commit status cannot be
+  proven after a temporary failure. Treats bodies as opaque JSON on purpose —
+  the API is large and version-dependent.
 - `internal/server/` — MCP tools, in two layers.
   - **Designed tools** (the point of this server) — task-oriented, ergonomic for
     agents: name-based inputs, parsed quantities, compact/readable output.
@@ -36,7 +40,10 @@ go run .          # needs TANDOOR_URL and TANDOOR_TOKEN in the environment
     update/delete/action` + `tandoor_resources`. A restricted escape hatch for
     non-secret, non-admin, non-raw-log resources the designed tools don't handle.
     NOT the primary surface.
-  - `server.go` — server construction, tool registration, result helpers.
+  - `server.go` — server construction, tool registration, per-tool operation
+    timeout wrapper, structured error helpers.
+  - `http.go` / `readiness.go` — Streamable HTTP/SSE transport and cached,
+    sanitized readiness checks against the real Tandoor API.
 
 Design rule: tools are shaped around what an agent is doing, not around REST
 endpoints. Prefer a designed tool that hides nested serializer shapes and id
@@ -69,7 +76,9 @@ This codebase is maintained to a strict standard. Hold the line:
   exist only for endpoints whose contract is known.
 - **Errors surface, never swallow.** Return `APIError` and wrapped errors up to the
   tool result; do not log-and-continue, silently broaden filters, silently save
-  partial imports, or discard the API's message.
+  partial imports, or discard the API's message. Partial mutations must set
+  `CallToolResult.IsError`; ambiguous writes must use a structured
+  `outcome_unknown` result rather than claiming success.
 - **Build and test must be green before done.** `make vet test` passes, or it is
   not finished.
 

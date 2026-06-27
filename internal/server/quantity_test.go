@@ -111,7 +111,7 @@ func TestCreateRecipeHeaderNotSentToParser(t *testing.T) {
 // --- Fix #3: a no-amount shopping entry must not render "0 X" ---
 
 func TestGetShoppingListHonorsNoAmount(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[{"id":1,"amount":0,"no_amount":true,"food":{"name":"salt"},"checked":false}]`)
 	})
 	res, _, err := h.getShoppingList(context.Background(), nil, getShoppingInput{})
@@ -159,7 +159,7 @@ func TestBuildIngredientRejectsTextAndStructured(t *testing.T) {
 // --- Fix F-A: providing both top-level ingredients and steps[] must error ---
 
 func TestCreateRecipeRejectsBothIngredientsAndSteps(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("must not call the API when both ingredients and steps are given")
 	})
 	amt := 1.0

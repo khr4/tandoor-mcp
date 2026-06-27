@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,8 @@ import (
 
 // maxImageBytes caps the size of a local image upload.
 const maxImageBytes = 16 << 20
+
+const maxFindRecipesLimit = 100
 
 // ---- find_recipes ----
 
@@ -81,7 +85,10 @@ func (h *handlers) findRecipes(ctx context.Context, _ *mcp.CallToolRequest, in f
 		q.Set("sort_order", "-created_at")
 	}
 	limit := 25
-	if in.Limit != nil && *in.Limit > 0 {
+	if in.Limit != nil {
+		if *in.Limit <= 0 || *in.Limit > maxFindRecipesLimit {
+			return nil, nil, fmt.Errorf("limit must be between 1 and %d", maxFindRecipesLimit)
+		}
 		limit = *in.Limit
 	}
 	q.Set("page_size", strconv.Itoa(limit))
@@ -126,6 +133,7 @@ type getRecipeOutput struct {
 	Properties     []propertyOut `json:"properties,omitempty"`
 	Steps          []stepOut     `json:"steps"`
 	Warnings       []string      `json:"warnings,omitempty"`
+	EditRevision   string        `json:"edit_revision"`
 	Markdown       string        `json:"markdown"`
 }
 
@@ -135,13 +143,9 @@ func (h *handlers) getRecipe(ctx context.Context, _ *mcp.CallToolRequest, in get
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/", id), nil, nil)
+	_, r, revision, err := h.fetchRecipe(ctx, id)
 	if err != nil {
 		return nil, nil, err
-	}
-	var r apiRecipe
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, nil, fmt.Errorf("decoding recipe: %w", err)
 	}
 	rendered := cloneRecipe(r)
 	var warnings []string
@@ -157,7 +161,7 @@ func (h *handlers) getRecipe(ctx context.Context, _ *mcp.CallToolRequest, in get
 		// Nutrition is shown as stored, never re-scaled: its basis (per-recipe vs
 		// per-serving) is configuration-dependent, so scaling it would mislead.
 		Nutrition: toNutrition(r), Properties: toProperties(r),
-		Steps: toStepOuts(r), Warnings: warnings, Markdown: renderRecipe(rendered),
+		Steps: toStepOuts(r), Warnings: warnings, EditRevision: revision, Markdown: renderRecipe(rendered),
 	})
 }
 
@@ -222,6 +226,16 @@ func (h *handlers) createRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 	raw, err := h.c.Do(ctx, http.MethodPost, "recipe/", nil, body)
 	if err != nil {
+		var unknown *tandoor.OutcomeUnknownError
+		if errors.As(err, &unknown) {
+			extra := map[string]any{"operation": "create_recipe", "name": in.Name}
+			if ids, lookupErr := h.recipeCandidateIDsByName(ctx, in.Name); lookupErr == nil && len(ids) > 0 {
+				extra["candidate_recipe_ids"] = ids
+			} else if lookupErr != nil {
+				extra["candidate_lookup_error"] = lookupErr.Error()
+			}
+			return outcomeUnknownResult(unknown, extra)
+		}
 		return nil, nil, err
 	}
 	var created apiRecipe
@@ -292,6 +306,10 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	}
 	raw, err := h.c.Do(ctx, http.MethodPost, "recipe-from-source/", nil, map[string]any{"url": in.URL})
 	if err != nil {
+		var unknown *tandoor.OutcomeUnknownError
+		if errors.As(err, &unknown) {
+			return outcomeUnknownResult(unknown, map[string]any{"operation": "import_recipe_from_url", "source": in.URL})
+		}
 		if msg, ok := importErrorMessage(err); ok {
 			return nil, nil, fmt.Errorf("could not import: %s", msg)
 		}
@@ -340,6 +358,16 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 	}
 	created, err := h.c.Do(ctx, http.MethodPost, "recipe/", nil, body)
 	if err != nil {
+		var unknown *tandoor.OutcomeUnknownError
+		if errors.As(err, &unknown) {
+			extra := map[string]any{"operation": "import_recipe_from_url_create", "source": in.URL, "name": sr.Name}
+			if ids, lookupErr := h.recipeCandidateIDsByName(ctx, sr.Name); lookupErr == nil && len(ids) > 0 {
+				extra["candidate_recipe_ids"] = ids
+			} else if lookupErr != nil {
+				extra["candidate_lookup_error"] = lookupErr.Error()
+			}
+			return outcomeUnknownResult(unknown, extra)
+		}
 		return nil, nil, err
 	}
 	var rec apiRecipe
@@ -355,15 +383,16 @@ func (h *handlers) importRecipeFromURL(ctx context.Context, _ *mcp.CallToolReque
 // ---- update_recipe ----
 
 type updateRecipeInput struct {
-	Recipe         string   `json:"recipe" jsonschema:"recipe name or numeric id"`
-	Name           *string  `json:"name,omitempty" jsonschema:"new name"`
-	Description    *string  `json:"description,omitempty" jsonschema:"new description"`
-	Servings       *int     `json:"servings,omitempty" jsonschema:"new serving count"`
-	WorkingTime    *int     `json:"working_time,omitempty" jsonschema:"prep time in minutes"`
-	WaitingTime    *int     `json:"waiting_time,omitempty" jsonschema:"cooking/waiting time in minutes"`
-	SourceURL      *string  `json:"source_url,omitempty" jsonschema:"new source URL"`
-	AddKeywords    []string `json:"add_keywords,omitempty" jsonschema:"keyword names to add"`
-	RemoveKeywords []string `json:"remove_keywords,omitempty" jsonschema:"keyword names to remove"`
+	Recipe           string   `json:"recipe" jsonschema:"recipe name or numeric id"`
+	ExpectedRevision string   `json:"expected_revision,omitempty" jsonschema:"edit_revision from get_recipe; required for keyword edits"`
+	Name             *string  `json:"name,omitempty" jsonschema:"new name"`
+	Description      *string  `json:"description,omitempty" jsonschema:"new description"`
+	Servings         *int     `json:"servings,omitempty" jsonschema:"new serving count"`
+	WorkingTime      *int     `json:"working_time,omitempty" jsonschema:"prep time in minutes"`
+	WaitingTime      *int     `json:"waiting_time,omitempty" jsonschema:"cooking/waiting time in minutes"`
+	SourceURL        *string  `json:"source_url,omitempty" jsonschema:"new source URL"`
+	AddKeywords      []string `json:"add_keywords,omitempty" jsonschema:"keyword names to add"`
+	RemoveKeywords   []string `json:"remove_keywords,omitempty" jsonschema:"keyword names to remove"`
 }
 
 // updateRecipe applies targeted edits without resending the whole recipe.
@@ -387,11 +416,22 @@ func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 	setInt(body, "waiting_time", in.WaitingTime)
 
 	if len(in.AddKeywords) > 0 || len(in.RemoveKeywords) > 0 {
-		names, err := h.mergedKeywordNames(ctx, id, in.AddKeywords, in.RemoveKeywords)
+		if strings.TrimSpace(in.ExpectedRevision) == "" {
+			return nil, nil, fmt.Errorf("expected_revision from get_recipe is required for keyword edits")
+		}
+		_, r, revision, err := h.fetchRecipe(ctx, id)
 		if err != nil {
 			return nil, nil, err
 		}
+		if revision != strings.TrimSpace(in.ExpectedRevision) {
+			return nil, nil, fmt.Errorf("recipe changed since get_recipe; refresh it and retry with the new edit_revision")
+		}
+		names := mergedKeywordNamesFromRecipe(r, in.AddKeywords, in.RemoveKeywords)
 		body["keywords"] = keywordObjects(names)
+	} else if strings.TrimSpace(in.ExpectedRevision) != "" {
+		if err := h.checkRecipeRevision(ctx, id, in.ExpectedRevision); err != nil {
+			return nil, nil, err
+		}
 	}
 	if len(body) == 0 {
 		return nil, nil, fmt.Errorf("nothing to update: provide at least one field")
@@ -402,14 +442,21 @@ func (h *handlers) updateRecipe(ctx context.Context, _ *mcp.CallToolRequest, in 
 // ---- set_recipe_steps ----
 
 type setRecipeStepsInput struct {
-	Recipe string      `json:"recipe" jsonschema:"recipe name or numeric id"`
-	Steps  []stepInput `json:"steps" jsonschema:"the full new ordered list of steps and ingredients, replacing the existing ones"`
+	Recipe           string      `json:"recipe" jsonschema:"recipe name or numeric id"`
+	ExpectedRevision string      `json:"expected_revision" jsonschema:"edit_revision from get_recipe"`
+	Steps            []stepInput `json:"steps" jsonschema:"the full new ordered list of steps and ingredients, replacing the existing ones"`
 }
 
 // setRecipeSteps replaces a recipe's steps/ingredients (re-describe to edit).
 func (h *handlers) setRecipeSteps(ctx context.Context, _ *mcp.CallToolRequest, in setRecipeStepsInput) (*mcp.CallToolResult, any, error) {
 	id, err := h.resolveRecipe(ctx, in.Recipe)
 	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(in.ExpectedRevision) == "" {
+		return nil, nil, fmt.Errorf("expected_revision from get_recipe is required")
+	}
+	if err := h.checkRecipeRevision(ctx, id, in.ExpectedRevision); err != nil {
 		return nil, nil, err
 	}
 	steps, err := h.buildSteps(ctx, in.Steps)
@@ -431,16 +478,60 @@ func (h *handlers) patchRecipe(ctx context.Context, id int, body map[string]any,
 	return jsonResult(map[string]any{"status": status, "recipe": toCard(r)})
 }
 
-// mergedKeywordNames reads the recipe's current keywords and applies adds/removes.
-func (h *handlers) mergedKeywordNames(ctx context.Context, recipeID int, add, remove []string) ([]string, error) {
-	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/", recipeID), nil, nil)
+func (h *handlers) fetchRecipe(ctx context.Context, id int) (json.RawMessage, apiRecipe, string, error) {
+	raw, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("recipe/%d/", id), nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, apiRecipe{}, "", err
 	}
 	var r apiRecipe
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("decoding recipe: %w", err)
+		return nil, apiRecipe{}, "", fmt.Errorf("decoding recipe: %w", err)
 	}
+	return raw, r, recipeRevision(raw), nil
+}
+
+func recipeRevision(raw json.RawMessage) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func (h *handlers) checkRecipeRevision(ctx context.Context, id int, expected string) error {
+	_, _, revision, err := h.fetchRecipe(ctx, id)
+	if err != nil {
+		return err
+	}
+	if revision != strings.TrimSpace(expected) {
+		return fmt.Errorf("recipe changed since get_recipe; refresh it and retry with the new edit_revision")
+	}
+	return nil
+}
+
+func (h *handlers) recipeCandidateIDsByName(ctx context.Context, name string) ([]int, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	q := url.Values{}
+	q.Set("query", name)
+	q.Set("page_size", "10")
+	raw, err := h.c.Do(ctx, http.MethodGet, "recipe/", q, nil)
+	if err != nil {
+		return nil, err
+	}
+	var recipes []apiRecipe
+	if err := decodeList(raw, &recipes); err != nil {
+		return nil, fmt.Errorf("decoding candidate recipes: %w", err)
+	}
+	var ids []int
+	for _, r := range recipes {
+		if strings.EqualFold(strings.TrimSpace(r.Name), name) {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
+}
+
+func mergedKeywordNamesFromRecipe(r apiRecipe, add, remove []string) []string {
 	set := map[string]string{} // lower -> display
 	for _, k := range r.Keywords {
 		set[strings.ToLower(k.display())] = k.display()
@@ -457,7 +548,7 @@ func (h *handlers) mergedKeywordNames(ctx context.Context, recipeID int, add, re
 	for _, v := range set {
 		names = append(names, v)
 	}
-	return names, nil
+	return names
 }
 
 // ---- delete_recipe ----

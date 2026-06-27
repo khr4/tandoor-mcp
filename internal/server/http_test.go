@@ -138,6 +138,51 @@ func TestReadyzUsesRealCheck(t *testing.T) {
 	}
 }
 
+func TestTandoorReadyCheckUsesRecipeProbe(t *testing.T) {
+	var gotPath, gotQuery string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"count":0,"results":[]}`)
+	}))
+	t.Cleanup(backend.Close)
+	c, err := tandoor.New(tandoor.Config{BaseURL: backend.URL, Token: "tok"})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if err := TandoorReadyCheck(c)(context.Background()); err != nil {
+		t.Fatalf("ready check: %v", err)
+	}
+	if gotPath != "/api/recipe/" || gotQuery != "page_size=1" {
+		t.Fatalf("probe = %s?%s, want /api/recipe/?page_size=1", gotPath, gotQuery)
+	}
+}
+
+func TestReadyzCachesAndSanitizesFailure(t *testing.T) {
+	var calls int
+	front := httptest.NewServer(newHTTPHandler(mcpServer(t, nil), "secret", func(context.Context) error {
+		calls++
+		return io.ErrUnexpectedEOF
+	}))
+	t.Cleanup(front.Close)
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(front.URL + "/readyz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		closeBody(t, resp)
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", resp.StatusCode)
+		}
+		if strings.Contains(string(body), "unexpected") {
+			t.Fatalf("readyz leaked upstream error: %s", body)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("ready check calls = %d, want cached failure to avoid second probe", calls)
+	}
+}
+
 func TestServeHTTPFailsClosed(t *testing.T) {
 	// Both refusal paths return before any listener opens or anything is logged.
 	srv := mcpServer(t, nil)

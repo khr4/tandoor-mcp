@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,8 +10,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/khr4/tandoor-mcp/internal/tandoor"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+const maxListTaxonomyLimit = 200
 
 func validKind(kind string, allowed ...string) (string, error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
@@ -57,7 +61,10 @@ func (h *handlers) listTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in 
 	q := url.Values{}
 	addStr(q, "query", in.Query)
 	limit := 50
-	if in.Limit != nil && *in.Limit > 0 {
+	if in.Limit != nil {
+		if *in.Limit <= 0 || *in.Limit > maxListTaxonomyLimit {
+			return nil, nil, fmt.Errorf("limit must be between 1 and %d", maxListTaxonomyLimit)
+		}
 		limit = *in.Limit
 	}
 	q.Set("page_size", strconv.Itoa(limit))
@@ -94,7 +101,19 @@ func (h *handlers) mergeTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
+	if src == tgt {
+		return nil, nil, fmt.Errorf("source and target are the same %s id %d", kind, src)
+	}
 	if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("%s/%d/merge/%d/", kind, src, tgt), nil, nil); err != nil {
+		var unknown *tandoor.OutcomeUnknownError
+		if errors.As(err, &unknown) {
+			if exists, lookupErr := h.taxonomyIDExists(ctx, kind, src); lookupErr == nil && !exists {
+				return jsonResult(map[string]any{"status": "merged", "kind": kind, "source_id": src, "target_id": tgt, "verified_after_unknown": true})
+			} else if lookupErr != nil {
+				return outcomeUnknownResult(unknown, map[string]any{"operation": "merge_taxonomy", "kind": kind, "source_id": src, "target_id": tgt, "postcondition_error": lookupErr.Error()})
+			}
+			return outcomeUnknownResult(unknown, map[string]any{"operation": "merge_taxonomy", "kind": kind, "source_id": src, "target_id": tgt})
+		}
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"status": "merged", "kind": kind, "source_id": src, "target_id": tgt})
@@ -125,8 +144,22 @@ func (h *handlers) moveTaxonomy(ctx context.Context, _ *mcp.CallToolRequest, in 
 			return nil, nil, err
 		}
 	}
+	if item == parent {
+		return nil, nil, fmt.Errorf("item and parent are the same %s id %d", kind, item)
+	}
 	if _, err := h.c.Do(ctx, http.MethodPut, fmt.Sprintf("%s/%d/move/%d/", kind, item, parent), nil, nil); err != nil {
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"status": "moved", "kind": kind, "item_id": item, "parent_id": parent})
+}
+
+func (h *handlers) taxonomyIDExists(ctx context.Context, kind string, id int) (bool, error) {
+	if _, err := h.c.Do(ctx, http.MethodGet, fmt.Sprintf("%s/%d/", kind, id), nil, nil); err != nil {
+		var apiErr *tandoor.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

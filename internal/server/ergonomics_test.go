@@ -13,7 +13,7 @@ import (
 // --- A: not-found errors carry a discovery hint ---
 
 func TestResolveRecipeNotFoundHasHint(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"results":[]}`)
 	})
 	_, err := h.resolveRecipe(context.Background(), "Nope")
@@ -23,7 +23,7 @@ func TestResolveRecipeNotFoundHasHint(t *testing.T) {
 }
 
 func TestResolveTaxonomyNotFoundHasHint(t *testing.T) {
-	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"results":[]}`)
 	})
 	_, err := h.resolveTaxonomyID(context.Background(), "keyword", "Nope")

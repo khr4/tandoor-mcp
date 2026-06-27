@@ -13,6 +13,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const maxGenericPageSize = 200
+
 // resolve validates a resource name against the catalog and restricted denylist.
 func resolve(name string) (Resource, error) {
 	name = strings.TrimSpace(name)
@@ -57,9 +59,15 @@ func (h *handlers) genericList(ctx context.Context, _ *mcp.CallToolRequest, in l
 		q.Set("query", in.Query)
 	}
 	if in.Page != nil {
+		if *in.Page <= 0 {
+			return nil, nil, fmt.Errorf("page must be positive")
+		}
 		q.Set("page", strconv.Itoa(*in.Page))
 	}
 	if in.PageSize != nil {
+		if *in.PageSize <= 0 || *in.PageSize > maxGenericPageSize {
+			return nil, nil, fmt.Errorf("page_size must be between 1 and %d", maxGenericPageSize)
+		}
 		q.Set("page_size", strconv.Itoa(*in.PageSize))
 	}
 	if in.Ordering != "" {

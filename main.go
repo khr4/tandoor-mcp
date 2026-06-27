@@ -10,8 +10,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -35,7 +33,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	opts := server.Options{ImageDir: os.Getenv("TANDOOR_IMAGE_DIR")}
+	opts, err := server.OptionsFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -49,11 +50,7 @@ func main() {
 			TLSCert:                   strings.TrimSpace(os.Getenv("TANDOOR_TLS_CERT")),
 			TLSKey:                    strings.TrimSpace(os.Getenv("TANDOOR_TLS_KEY")),
 			AllowCleartextNonLoopback: strings.EqualFold(strings.TrimSpace(os.Getenv("TANDOOR_HTTP_ALLOW_CLEAR")), "true"),
-			ReadyCheck: func(ctx context.Context) error {
-				q := url.Values{"page_size": []string{"1"}}
-				_, err := client.Do(ctx, http.MethodGet, "recipe/", q, nil)
-				return err
-			},
+			ReadyCheck:                server.TandoorReadyCheck(client),
 		})
 	} else {
 		err = srv.Run(ctx, &mcp.StdioTransport{})

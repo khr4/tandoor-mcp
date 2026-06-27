@@ -120,6 +120,7 @@ func (h *handlers) setFoodOnHand(ctx context.Context, _ *mcp.CallToolRequest, in
 	if len(failures) > 0 {
 		out["status"] = "partial"
 		out["failures"] = failures
+		return jsonErrorResult(out)
 	}
 	return jsonResult(out)
 }

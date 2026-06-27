@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"mime"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -64,10 +66,18 @@ func TestSecureTransportUsesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// Secure mode leaves Transport nil so the client uses http.DefaultTransport,
-	// which already negotiates HTTP/2 (ALPN), honors proxy env and pools conns.
-	if c.http.Transport != nil {
-		t.Errorf("secure transport = %T, want nil (http.DefaultTransport)", c.http.Transport)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", c.http.Transport)
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 is false: HTTP/2 silently disabled")
+	}
+	if tr.Proxy == nil {
+		t.Error("Proxy is nil: HTTPS_PROXY/NO_PROXY ignored")
+	}
+	if tr.MaxConnsPerHost != defaultMaxConcurrency {
+		t.Errorf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, defaultMaxConcurrency)
 	}
 }
 
@@ -287,5 +297,193 @@ func TestConfigFromEnvValidation(t *testing.T) {
 	}
 	if cfg.Timeout != 15*time.Second {
 		t.Errorf("timeout = %v, want 15s", cfg.Timeout)
+	}
+}
+
+func TestConfigFromEnvResilienceKnobs(t *testing.T) {
+	t.Setenv("TANDOOR_URL", "https://recipes.example.com")
+	t.Setenv("TANDOOR_TOKEN", "tok")
+	t.Setenv("TANDOOR_MAX_CONCURRENCY", "3")
+	t.Setenv("TANDOOR_RETRY_MAX", "0")
+	t.Setenv("TANDOOR_RETRY_BASE_MS", "7")
+	t.Setenv("TANDOOR_BREAKER_FAILURES", "2")
+	t.Setenv("TANDOOR_BREAKER_COOLDOWN_SECONDS", "4")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv: %v", err)
+	}
+	if cfg.MaxConcurrency != 3 || cfg.RetryMax != 0 || cfg.RetryBaseDelay != 7*time.Millisecond || cfg.BreakerFailures != 2 || cfg.BreakerCooldown != 4*time.Second {
+		t.Errorf("cfg = %+v, resilience knobs not parsed", cfg)
+	}
+}
+
+func TestNewRejectsInvalidResilienceConfig(t *testing.T) {
+	base := Config{BaseURL: "https://recipes.example.com", Token: "tok"}
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "negative timeout", cfg: Config{Timeout: -time.Second}},
+		{name: "negative max concurrency", cfg: Config{MaxConcurrency: -1}},
+		{name: "excessive max concurrency", cfg: Config{MaxConcurrency: 65}},
+		{name: "negative retry max", cfg: Config{RetryMax: -1}},
+		{name: "excessive retry max", cfg: Config{RetryMax: 6}},
+		{name: "negative retry delay", cfg: Config{RetryBaseDelay: -time.Millisecond}},
+		{name: "negative breaker failures", cfg: Config{BreakerFailures: -1}},
+		{name: "negative breaker cooldown", cfg: Config{BreakerCooldown: -time.Second}},
+	}
+	for _, tc := range cases {
+		cfg := base
+		if tc.cfg.Timeout != 0 {
+			cfg.Timeout = tc.cfg.Timeout
+		}
+		if tc.cfg.MaxConcurrency != 0 {
+			cfg.MaxConcurrency = tc.cfg.MaxConcurrency
+		}
+		if tc.cfg.RetryMax != 0 {
+			cfg.RetryMax = tc.cfg.RetryMax
+		}
+		if tc.cfg.RetryBaseDelay != 0 {
+			cfg.RetryBaseDelay = tc.cfg.RetryBaseDelay
+		}
+		if tc.cfg.BreakerFailures != 0 {
+			cfg.BreakerFailures = tc.cfg.BreakerFailures
+		}
+		if tc.cfg.BreakerCooldown != 0 {
+			cfg.BreakerCooldown = tc.cfg.BreakerCooldown
+		}
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s: expected error", tc.name)
+		}
+	}
+}
+
+func TestGETRetriesTemporaryFailure(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `try again`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{
+		BaseURL: srv.URL, Token: "tok", Timeout: time.Second,
+		RetryMax: 1, RetryBaseDelay: time.Millisecond, BreakerFailures: 5,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	raw, err := c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if string(raw) != `{"ok":true}` || attempts != 2 {
+		t.Errorf("raw=%s attempts=%d, want success after two attempts", raw, attempts)
+	}
+}
+
+func TestMutatingTemporaryFailureIsOutcomeUnknownAndNotRetried(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `database restarting`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{
+		BaseURL: srv.URL, Token: "tok", Timeout: time.Second,
+		RetryMax: 3, RetryBaseDelay: time.Millisecond, BreakerFailures: 5,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.Do(context.Background(), http.MethodPost, "recipe/", nil, map[string]any{"name": "Soup"})
+	var unknown *OutcomeUnknownError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("err = %T %[1]v, want OutcomeUnknownError", err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want no retry for mutating call", attempts)
+	}
+}
+
+func TestTimeoutFailureSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{BaseURL: srv.URL, Token: "tok", Timeout: 5 * time.Millisecond, RetryMax: 0})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil)
+	if err == nil || !isTemporaryFailure(err) {
+		t.Fatalf("err = %v, want temporary timeout failure", err)
+	}
+}
+
+func TestCircuitBreakerFastFailsAfterThreshold(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `down`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{
+		BaseURL: srv.URL, Token: "tok", Timeout: time.Second,
+		RetryMax: 0, BreakerFailures: 1, BreakerCooldown: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil); err == nil {
+		t.Fatal("first call should fail")
+	}
+	if _, err := c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil); err == nil {
+		t.Fatal("second call should fast-fail")
+	} else {
+		var open *BreakerOpenError
+		if !errors.As(err, &open) {
+			t.Fatalf("err = %T %[1]v, want BreakerOpenError", err)
+		}
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want breaker to block second upstream call", attempts)
+	}
+}
+
+func TestBulkheadCapsConcurrentUpstreamCalls(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entered <- struct{}{}
+		<-release
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{BaseURL: srv.URL, Token: "tok", Timeout: time.Second, MaxConcurrency: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), http.MethodGet, "recipe/", nil, nil)
+		done <- err
+	}()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := c.Do(ctx, http.MethodGet, "recipe/", nil, nil); err == nil || !strings.Contains(err.Error(), "concurrency slot") {
+		t.Fatalf("second Do err = %v, want bulkhead wait failure", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first Do: %v", err)
 	}
 }

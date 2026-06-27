@@ -26,9 +26,20 @@ Configured entirely via environment variables:
 | `TANDOOR_TOKEN` | yes | API token — Tandoor: *Settings → API → generate*. (`TANDOOR_API_TOKEN` also accepted.) |
 | `TANDOOR_INSECURE_SKIP_VERIFY` | no | `true` to skip TLS verification (self-signed instances). Logs a warning. |
 | `TANDOOR_TIMEOUT` | no | Per-request timeout in seconds (default `30`). |
+| `TANDOOR_OPERATION_TIMEOUT` | no | Total budget for one MCP tool call in seconds (default `120`). |
+| `TANDOOR_MAX_CONCURRENCY` | no | Maximum concurrent upstream Tandoor requests (default `8`, allowed `1..64`). |
+| `TANDOOR_RETRY_MAX` | no | Extra attempts for safe read requests only (default `2`, set `0` to disable). |
+| `TANDOOR_RETRY_BASE_MS` | no | Base retry backoff in milliseconds (default `200`). |
+| `TANDOOR_BREAKER_FAILURES` | no | Consecutive temporary upstream failures before the circuit opens (default `5`). |
+| `TANDOOR_BREAKER_COOLDOWN_SECONDS` | no | Open-circuit cooldown before one half-open probe (default `10`). |
 | `TANDOOR_IMAGE_DIR` | no | Directory `set_recipe_image` may read local files from. Unset disables local-file uploads (use `image_url`). |
 
 The token is sent as `Authorization: Bearer <token>`.
+
+Safe read requests (`GET`) retry temporary upstream failures with bounded
+exponential backoff and `Retry-After` support. Mutating requests are never
+blindly retried: if a timeout or temporary upstream failure leaves the commit
+status unknown, the tool returns a structured `outcome_unknown` MCP error.
 
 ### Transport
 
@@ -46,8 +57,9 @@ per-client launch (`.mcp.json` / `claude_desktop_config.json`). Set
 The HTTP transport exposes the modern **Streamable HTTP** transport at `/mcp`
 (request/response plus SSE streaming), the legacy **SSE** transport at `/sse`,
 an unauthenticated `/healthz` liveness probe, and `/readyz`, which checks Tandoor
-with the configured API token. HTTP/1.1 and HTTP/2 are both served (h2 over TLS,
-h2c in cleartext).
+with the configured API token. Readiness results are briefly cached and failure
+responses are sanitized so upstream error bodies are not exposed publicly.
+HTTP/1.1 and HTTP/2 are both served (h2 over TLS, h2c in cleartext).
 
 **Behind a reverse proxy** (the common case): bind loopback and let the proxy on
 the same host terminate TLS. The bearer token is the trust boundary, so the SDK's
@@ -97,11 +109,11 @@ Recipes — every recipe argument accepts a **name or id**:
 | Tool | Purpose |
 |---|---|
 | `find_recipes` | Search by words, keyword/ingredient **names** (match ALL), book, rating, or makeable-now. Requested name filters fail closed if they cannot be resolved. Returns compact cards. |
-| `get_recipe` | One recipe as structured fields, an editable stored `steps[]` array, stored nutrition/properties (when set), and a Markdown view; optional `servings` re-scales the Markdown amounts only (not nutrition), leaving structured steps safe to edit. |
+| `get_recipe` | One recipe as structured fields, an editable stored `steps[]` array, stored nutrition/properties (when set), an `edit_revision` for stale-write protection, and a Markdown view; optional `servings` re-scales the Markdown amounts only (not nutrition), leaving structured steps safe to edit. |
 | `create_recipe` | Create a recipe. Ingredients as natural lines (`"2 cups flour"`, parsed into amount+unit+food) or explicit `{amount, unit, food}`; top-level `ingredients` for simple recipes or `steps[]` for multi-step. Foods/units/keywords created by name. |
 | `import_recipe_from_url` | Scrape a public web page and save it. `save=false` returns a preview only when Tandoor returns parsed recipe data without saving server-side. If parsed ingredients would be dropped, saving is refused unless `allow_partial=true`. |
-| `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. |
-| `set_recipe_steps` | Replace a recipe's steps/ingredients — read `get_recipe`'s `steps[]`, edit, pass back. |
+| `update_recipe` | Targeted edits: name, description, servings, times, add/remove keywords. Keyword edits require `expected_revision` from `get_recipe`. |
+| `set_recipe_steps` | Replace a recipe's steps/ingredients — read `get_recipe`'s `steps[]` and `edit_revision`, edit, pass back with `expected_revision`. |
 | `delete_recipe` | Delete a recipe. |
 | `set_recipe_image` | Set an image from a public remote URL, or a regular local file within `TANDOOR_IMAGE_DIR`. |
 | `find_related_recipes` | Recipes sharing keywords/foods. |
@@ -116,9 +128,9 @@ Meal planning, shopping, pantry, taxonomy:
 | `get_shopping_list` | Current entries as readable lines plus structured amount/unit/food fields and truncation metadata. |
 | `add_to_shopping_list` | Add an ad-hoc food with amount + unit. |
 | `add_recipe_to_shopping` | Add a recipe's ingredients (optionally scaled). |
-| `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. Clear refuses to run if the shopping list scan is truncated. |
+| `update_shopping_item` / `clear_shopping_list` | Check off / edit / clear entries. Clear refuses to run if the shopping list scan is truncated and returns an MCP error result if any delete in the batch fails. |
 | `check_shopping_items` | Check or uncheck many entries at once (incl. uncheck-all). |
-| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand (pass `foods[]` to stock several at once). Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos. |
+| `get_pantry` / `set_food_on_hand` | Read / set foods marked on-hand (pass `foods[]` to stock several at once). Marking on-hand creates a food by name if missing; clearing requires an existing food and refuses typos; partial batch failures are MCP error results with per-food details. |
 | `list_taxonomy` | List keywords, foods or units (`kind`) with ids. |
 | `merge_taxonomy` / `move_taxonomy` | Merge or re-parent a keyword/food/unit (by name or id). |
 

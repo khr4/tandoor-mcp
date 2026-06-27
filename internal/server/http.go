@@ -64,6 +64,7 @@ func newHTTPHandler(srv *mcp.Server, token string, readyCheck func(context.Conte
 	disableRebind := token != ""
 	streamable := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: disableRebind})
 	sse := mcp.NewSSEHandler(getServer, &mcp.SSEOptions{DisableLocalhostProtection: disableRebind})
+	ready := newReadyProbe(readyCheck)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", protect(token, streamable))
@@ -80,8 +81,8 @@ func newHTTPHandler(srv *mcp.Server, token string, readyCheck func(context.Conte
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		if err := readyCheck(ctx); err != nil {
-			http.Error(w, fmt.Sprintf(`{"status":"unready","error":%q}`, err.Error()), http.StatusServiceUnavailable)
+		if !ready.checkReady(ctx) {
+			http.Error(w, `{"status":"unready"}`, http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}`))

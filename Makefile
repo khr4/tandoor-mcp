@@ -1,5 +1,10 @@
 BINARY := tandoor-mcp
 GIT_SECRETS_PROVIDER := $(CURDIR)/.githooks/git-secrets-provider
+CACHE_DIR ?= $(CURDIR)/.cache
+GOCACHE ?= $(CACHE_DIR)/go-build
+GOLANGCI_LINT_CACHE ?= $(CACHE_DIR)/golangci-lint
+export GOCACHE
+export GOLANGCI_LINT_CACHE
 
 .PHONY: build test vet lint tidy run clean install-hooks secret-scan verify
 

@@ -3,6 +3,7 @@
 # Go test/coverage artifacts
 *.out
 *.test
+.cache/
 # Local secrets and agent/client state
 .env
 .env.*

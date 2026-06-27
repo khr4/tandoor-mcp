@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/khr4/tandoor-mcp/internal/tandoor"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -68,13 +70,28 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 		// POST {name} alone is rejected with {"shared":["This field is required."]}.
 		raw, err := h.c.Do(ctx, http.MethodPost, "recipe-book/", nil, map[string]any{"name": book, "shared": []any{}})
 		if err != nil {
-			return nil, nil, err
+			var unknown *tandoor.OutcomeUnknownError
+			if errors.As(err, &unknown) {
+				id, found, lookupErr := h.resolveUniqueExistingID(ctx, "recipe-book", "recipe book", book)
+				if lookupErr != nil {
+					return outcomeUnknownResult(unknown, map[string]any{"operation": "create_recipe_book", "book": book, "candidate_lookup_error": lookupErr.Error()})
+				}
+				if found {
+					bookID = id
+				} else {
+					return outcomeUnknownResult(unknown, map[string]any{"operation": "create_recipe_book", "book": book})
+				}
+			} else {
+				return nil, nil, err
+			}
 		}
-		var created apiBook
-		if err := json.Unmarshal(raw, &created); err != nil {
-			return nil, nil, fmt.Errorf("decoding created recipe book: %w", err)
+		if bookID == 0 {
+			var created apiBook
+			if err := json.Unmarshal(raw, &created); err != nil {
+				return nil, nil, fmt.Errorf("decoding created recipe book: %w", err)
+			}
+			bookID = created.ID
 		}
-		bookID = created.ID
 	}
 	// recipe-book-entry enforces a unique (recipe, book) pair and 400s on a
 	// duplicate POST — its serializer's get_or_create never runs because the
@@ -86,6 +103,21 @@ func (h *handlers) addRecipeToBook(ctx context.Context, _ *mcp.CallToolRequest, 
 		return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
 	}
 	if _, err := h.c.Do(ctx, http.MethodPost, "recipe-book-entry/", nil, map[string]any{"book": bookID, "recipe": recipeID}); err != nil {
+		var apiErr *tandoor.APIError
+		var unknown *tandoor.OutcomeUnknownError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+			if _, exists, lookupErr := h.bookEntryID(ctx, recipeID, bookID); lookupErr == nil && exists {
+				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+			}
+		}
+		if errors.As(err, &unknown) {
+			if _, exists, lookupErr := h.bookEntryID(ctx, recipeID, bookID); lookupErr == nil && exists {
+				return jsonResult(map[string]any{"status": "already_in_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+			} else if lookupErr != nil {
+				return outcomeUnknownResult(unknown, map[string]any{"operation": "add_recipe_to_book", "recipe_id": recipeID, "book_id": bookID, "book": book, "membership_lookup_error": lookupErr.Error()})
+			}
+			return outcomeUnknownResult(unknown, map[string]any{"operation": "add_recipe_to_book", "recipe_id": recipeID, "book_id": bookID, "book": book})
+		}
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"status": "added", "recipe_id": recipeID, "book_id": bookID, "book": book})

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,6 +18,10 @@ import (
 // backed by an httptest Tandoor. This exercises input-schema inference,
 // validation and dispatch end to end.
 func connect(t *testing.T, backend http.HandlerFunc) *mcp.ClientSession {
+	return connectWithOptions(t, backend, Options{})
+}
+
+func connectWithOptions(t *testing.T, backend http.HandlerFunc, opts Options) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	srv := httptest.NewServer(backend)
@@ -27,7 +32,7 @@ func connect(t *testing.T, backend http.HandlerFunc) *mcp.ClientSession {
 		t.Fatalf("client: %v", err)
 	}
 	serverT, clientT := mcp.NewInMemoryTransports()
-	ss, err := New(c, Options{}).Connect(ctx, serverT, nil)
+	ss, err := New(c, opts).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -112,6 +117,24 @@ func TestEndToEndInputValidation(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Errorf("expected IsError for missing required fields, got: %s", toolText(res))
+	}
+}
+
+func TestEndToEndOperationTimeout(t *testing.T) {
+	ctx := context.Background()
+	cs := connectWithOptions(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"count":0,"results":[]}`)
+	}, Options{OperationTimeout: 5 * time.Millisecond})
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "find_recipes",
+		Arguments: map[string]any{"text": "slow"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError || !strings.Contains(toolText(res), "deadline") {
+		t.Fatalf("result IsError=%v text=%q, want deadline error", res.IsError, toolText(res))
 	}
 }
 

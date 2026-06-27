@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -103,16 +104,20 @@ func TestGetRecipeScalesAmounts(t *testing.T) {
 
 func TestUpdateRecipeMergesKeywords(t *testing.T) {
 	var patchBody map[string]any
+	recipeRaw := `{"id":5,"name":"Chili","keywords":[{"name":"spicy"}]}`
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			_, _ = io.WriteString(w, `{"id":5,"name":"Chili","keywords":[{"name":"spicy"}]}`)
+			_, _ = io.WriteString(w, recipeRaw)
 		case http.MethodPatch:
 			patchBody = decodeBody(t, r)
 			_, _ = io.WriteString(w, `{"id":5,"name":"Chili","keywords":[{"name":"spicy"},{"name":"vegan"}]}`)
 		}
 	})
-	res, _, err := h.updateRecipe(context.Background(), nil, updateRecipeInput{Recipe: "5", AddKeywords: []string{"vegan"}, RemoveKeywords: []string{"spicy"}})
+	res, _, err := h.updateRecipe(context.Background(), nil, updateRecipeInput{
+		Recipe: "5", ExpectedRevision: recipeRevision([]byte(recipeRaw)),
+		AddKeywords: []string{"vegan"}, RemoveKeywords: []string{"spicy"},
+	})
 	if err != nil {
 		t.Fatalf("updateRecipe: %v", err)
 	}
@@ -167,6 +172,16 @@ func TestFindRecipesBuildsAllHighValueFilters(t *testing.T) {
 	}
 }
 
+func TestFindRecipesRejectsExcessiveLimit(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for invalid limit")
+	})
+	tooHigh := maxFindRecipesLimit + 1
+	if _, _, err := h.findRecipes(context.Background(), nil, findRecipesInput{Limit: &tooHigh}); err == nil {
+		t.Fatal("expected limit rejection")
+	}
+}
+
 func TestUpdateRecipeRequiresAField(t *testing.T) {
 	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {})
 	if _, _, err := h.updateRecipe(context.Background(), nil, updateRecipeInput{Recipe: "5"}); err == nil {
@@ -176,8 +191,11 @@ func TestUpdateRecipeRequiresAField(t *testing.T) {
 
 func TestSetRecipeStepsPatchesSteps(t *testing.T) {
 	var patchBody map[string]any
+	recipeRaw := `{"id":5,"name":"X","steps":[]}`
 	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, recipeRaw)
 		case r.URL.Path == "/api/ingredient-parser/post/":
 			_, _ = io.WriteString(w, `{"ingredients":[{"amount":1,"unit":{"name":"tsp"},"food":{"name":"salt"}}]}`)
 		case r.Method == http.MethodPatch:
@@ -186,14 +204,32 @@ func TestSetRecipeStepsPatchesSteps(t *testing.T) {
 		}
 	})
 	_, _, err := h.setRecipeSteps(context.Background(), nil, setRecipeStepsInput{
-		Recipe: "5",
-		Steps:  []stepInput{{Instruction: "season", Ingredients: []ingredientInput{{Text: "1 tsp salt"}}}},
+		Recipe: "5", ExpectedRevision: recipeRevision([]byte(recipeRaw)),
+		Steps: []stepInput{{Instruction: "season", Ingredients: []ingredientInput{{Text: "1 tsp salt"}}}},
 	})
 	if err != nil {
 		t.Fatalf("setRecipeSteps: %v", err)
 	}
 	if at(t, patchBody, "steps") == nil {
 		t.Errorf("patch body missing steps: %v", patchBody)
+	}
+}
+
+func TestSetRecipeStepsRejectsStaleRevision(t *testing.T) {
+	currentRaw := `{"id":5,"name":"X","steps":[]}`
+	oldRaw := `{"id":5,"name":"Old","steps":[]}`
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("backend must not patch or parse after stale revision: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, currentRaw)
+	})
+	_, _, err := h.setRecipeSteps(context.Background(), nil, setRecipeStepsInput{
+		Recipe: "5", ExpectedRevision: recipeRevision([]byte(oldRaw)),
+		Steps: []stepInput{{Instruction: "season"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed since get_recipe") {
+		t.Fatalf("err = %v, want stale revision conflict", err)
 	}
 }
 
@@ -296,6 +332,27 @@ func TestImportRejectsNonHTTPURL(t *testing.T) {
 	})
 	if _, _, err := h.importRecipeFromURL(context.Background(), nil, importRecipeInput{URL: "file:///etc/passwd"}); err == nil {
 		t.Error("expected scheme rejection")
+	}
+}
+
+func TestCreateRecipeOutcomeUnknownReturnsStructuredError(t *testing.T) {
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/recipe/":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `database restarting`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/recipe/":
+			_, _ = io.WriteString(w, `{"next":null,"results":[{"id":42,"name":"Soup"}]}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	res, _, err := h.createRecipe(context.Background(), nil, createRecipeInput{Name: "Soup"})
+	if err != nil {
+		t.Fatalf("createRecipe: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), `"status": "outcome_unknown"`) || !strings.Contains(resultText(t, res), `"candidate_recipe_ids"`) {
+		t.Fatalf("result = %s, want structured outcome_unknown error", resultText(t, res))
 	}
 }
 
@@ -496,8 +553,39 @@ func TestClearShoppingListAggregatesErrors(t *testing.T) {
 	if out["removed"] != 1.0 || out["status"] != "partial" {
 		t.Errorf("out = %v, want removed 1 partial", out)
 	}
+	if !res.IsError {
+		t.Error("partial clear should be an MCP error result")
+	}
 	if !deleted["/api/shopping-list-entry/1/"] {
 		t.Error("entry 1 should have been deleted despite entry 2 failing")
+	}
+}
+
+func TestSetFoodOnHandPartialIsError(t *testing.T) {
+	nextID := 1
+	h := newHandlersFunc(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			id := nextID
+			nextID++
+			_, _ = io.WriteString(w, `{"id":`+strconv.Itoa(id)+`,"name":"x"}`)
+		case http.MethodPatch:
+			if strings.Contains(r.URL.Path, "/2/") {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `boom`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":1}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	res, _, err := h.setFoodOnHand(context.Background(), nil, setOnhandInput{Foods: []string{"milk", "flour"}})
+	if err != nil {
+		t.Fatalf("setFoodOnHand: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), `"status": "partial"`) {
+		t.Fatalf("result = %s, want partial MCP error", resultText(t, res))
 	}
 }
 
@@ -517,6 +605,16 @@ func TestGetPantryFiltersOnHand(t *testing.T) {
 	}
 	if len(out.OnHand) != 1 || out.OnHand[0].Name != "Milk" {
 		t.Errorf("on hand = %+v, want only Milk", out.OnHand)
+	}
+}
+
+func TestListTaxonomyRejectsExcessiveLimit(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for invalid limit")
+	})
+	tooHigh := maxListTaxonomyLimit + 1
+	if _, _, err := h.listTaxonomy(context.Background(), nil, listTaxonomyInput{Kind: "food", Limit: &tooHigh}); err == nil {
+		t.Fatal("expected limit rejection")
 	}
 }
 
@@ -861,6 +959,15 @@ func TestMergeTaxonomyRejectsAmbiguousName(t *testing.T) {
 	})
 	if _, _, err := h.mergeTaxonomy(context.Background(), nil, mergeTaxonomyInput{Kind: "keyword", Source: "Old", Target: "Target"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("mergeTaxonomy err = %v, want ambiguity", err)
+	}
+}
+
+func TestMergeTaxonomyRejectsSameID(t *testing.T) {
+	h := newHandlersFunc(t, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("backend must not be called for source==target")
+	})
+	if _, _, err := h.mergeTaxonomy(context.Background(), nil, mergeTaxonomyInput{Kind: "keyword", Source: "3", Target: "3"}); err == nil {
+		t.Fatal("expected source==target rejection")
 	}
 }
 
