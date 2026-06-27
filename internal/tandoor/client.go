@@ -357,7 +357,7 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, new
 		if attempted {
 			opened = c.breaker.recordFailure(temporary)
 		}
-		if method != http.MethodGet && temporary && attempted {
+		if method != http.MethodGet && attempted && (temporary || errors.Is(err, context.Canceled)) {
 			return nil, &OutcomeUnknownError{Method: method, Path: path, Cause: err}
 		}
 		if !attempted || method != http.MethodGet || !temporary || attempt == attempts-1 || opened {

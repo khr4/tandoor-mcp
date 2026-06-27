@@ -76,18 +76,23 @@ func newHTTPHandler(srv *mcp.Server, token string, readyCheck func(context.Conte
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if readyCheck == nil {
-			http.Error(w, `{"status":"not_configured"}`, http.StatusServiceUnavailable)
+			writeJSONStatus(w, http.StatusServiceUnavailable, `{"status":"not_configured"}`)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		if !ready.checkReady(ctx) {
-			http.Error(w, `{"status":"unready"}`, http.StatusServiceUnavailable)
+			writeJSONStatus(w, http.StatusServiceUnavailable, `{"status":"unready"}`)
 			return
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 	return mux
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, body string) {
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
 }
 
 // protect wraps h with a constant-time static-bearer check. An empty token
